@@ -28,7 +28,9 @@ from pretix.base.signals import (
     register_data_exporters, register_payment_providers,
     register_ticket_outputs,
 )
-from pretix.control.forms.orders import CommentForm, ExporterForm, ExtendForm
+from pretix.control.forms.orders import (
+    CommentForm, ExporterForm, ExtendForm, OrderPositionChangeForm,
+)
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.multidomain.urlreverse import build_absolute_uri
 
@@ -73,6 +75,12 @@ class OrderView(EventPermissionRequiredMixin, DetailView):
             event=self.request.event,
             code=self.kwargs['code'].upper()
         )
+
+    def _redirect_back(self):
+        return redirect('control:event.order',
+                        event=self.request.event.slug,
+                        organizer=self.request.event.organizer.slug,
+                        code=self.order.code)
 
     @cached_property
     def order(self):
@@ -431,12 +439,6 @@ class OrderExtend(OrderView):
         else:
             return self.get(*args, **kwargs)
 
-    def _redirect_back(self):
-        return redirect('control:event.order',
-                        event=self.request.event.slug,
-                        organizer=self.request.event.organizer.slug,
-                        code=self.order.code)
-
     def get(self, *args, **kwargs):
         if self.order.status != Order.STATUS_PENDING:
             messages.error(self.request, _('This action is only allowed for pending orders.'))
@@ -450,6 +452,40 @@ class OrderExtend(OrderView):
     def form(self):
         return ExtendForm(instance=self.order,
                           data=self.request.POST if self.request.method == "POST" else None)
+
+
+class OrderChange(OrderView):
+    permission = 'can_change_orders'
+    template_name = 'pretixcontrol/order/change.html'
+
+    def dispatch(self, request, *args, **kwargs):
+        if self.order.status != Order.STATUS_PENDING:
+            messages.error(self.request, _('This action is only allowed for pending orders.'))
+            return self._redirect_back()
+        return super().dispatch(request, *args, **kwargs)
+
+    @cached_property
+    def positions(self):
+        positions = list(self.order.positions.all())
+        for p in positions:
+            p.form = OrderPositionChangeForm(prefix='op-{}'.format(p.pk), instance=p,
+                                             data=self.request.POST if self.request.method == "POST" else None)
+        return positions
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['positions'] = self.positions
+        return ctx
+
+    def post(self, *args, **kwargs):
+        # check quotas
+        # custom prices
+        # vouchers
+        # recalculate total and payment fee
+        # regenerate invoice
+        # mail user
+        # cannot change free order to non-free (could never be paid)
+        return self.get(*args, **kwargs)
 
 
 class OverView(EventPermissionRequiredMixin, TemplateView):
