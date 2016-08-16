@@ -52,6 +52,11 @@
                 <div class="panel-body">
                     <div class="form-inline form-order-change">
                         {% bootstrap_form_errors position.form %}
+                        {% if positions.custom_error %}
+                            <div class="alert alert-danger">
+                                {{ positions.custom_error }}
+                            </div>
+                        {% endif %}
                         <div class="radio">
                             <label>
                                 <input name="{{ position.form.prefix }}-operation" type="radio" value=""
@@ -91,8 +96,8 @@
                     href="{% url "control:event.order" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
                 {% trans "Cancel" %}
             </a>
-            <button class="btn btn-danger btn-save btn-lg" type="submit">
-                {% trans "Save" %}
+            <button class="btn btn-primary btn-save btn-lg" type="submit">
+                {% trans "Perform changes" %}
             </button>
             <div class="clearfix"></div>
         </div>

@@ -74,13 +74,15 @@ class OrderPositionChangeForm(forms.Form):
         super().__init__(*args, **kwargs)
         choices = []
         for i in instance.order.event.items.prefetch_related('variations').all():
+            pname = i.name
+            if not i.is_available():
+                pname += ' ({})'.format(_('inactive'))
             variations = list(i.variations.all())
             if variations:
-                choices.append((str(i.pk), _('{product} – Any variation').format(product=i.name)))
                 for v in variations:
-                    choices.append(('%d-%d' % (i.pk, v.pk), '%s – %s' % (i.name, v.value)))
+                    choices.append(('%d-%d' % (i.pk, v.pk), '%s – %s' % (pname, v.value)))
             else:
-                choices.append((str(i.pk), i.name))
+                choices.append((str(i.pk), pname))
         self.fields['itemvar'].choices = choices
 
     def clean(self):

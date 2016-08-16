@@ -13,7 +13,8 @@ from django.views.generic import DetailView, ListView, TemplateView, View
 
 from pretix.base.i18n import language
 from pretix.base.models import (
-    CachedFile, CachedTicket, EventLock, Invoice, Item, Order, Quota,
+    CachedFile, CachedTicket, EventLock, Invoice, Item, ItemVariation, Order,
+    Quota,
 )
 from pretix.base.services import tickets
 from pretix.base.services.export import export
@@ -22,7 +23,9 @@ from pretix.base.services.invoices import (
     regenerate_invoice,
 )
 from pretix.base.services.mail import mail
-from pretix.base.services.orders import cancel_order, mark_order_paid
+from pretix.base.services.orders import (
+    OrderChangeManager, OrderError, cancel_order, mark_order_paid,
+)
 from pretix.base.services.stats import order_overview
 from pretix.base.signals import (
     register_data_exporters, register_payment_providers,
@@ -478,13 +481,47 @@ class OrderChange(OrderView):
         return ctx
 
     def post(self, *args, **kwargs):
-        # check quotas
-        # custom prices
-        # vouchers
-        # recalculate total and payment fee
-        # regenerate invoice
-        # mail user
-        # cannot change free order to non-free (could never be paid)
+        ocm = OrderChangeManager(self.order, self.request.user)
+        form_valid = True
+        for p in self.positions:
+            if not p.form.is_valid():
+                form_valid = False
+                break
+
+            try:
+                if p.form.cleaned_data['operation'] == 'product':
+                    if '-' in p.form.cleaned_data['itemvar']:
+                        itemid, varid = p.form.cleaned_data['itemvar'].split('-')
+                    else:
+                        itemid, varid = p.form.cleaned_data['itemvar'], None
+
+                    item = Item.objects.get(pk=itemid, event=self.request.event)
+                    if varid:
+                        variation = ItemVariation.objects.get(pk=varid, item=item)
+                    else:
+                        variation = None
+                    ocm.change_item(p, item, variation)
+                elif p.form.cleaned_data['operation'] == 'price':
+                    ocm.change_price(p, p.form.cleaned_data['price'])
+                elif p.form.cleaned_data['operation'] == 'cancel':
+                    ocm.cancel(p)
+
+            except OrderError as e:
+                p.custom_error = str(e)
+                form_valid = False
+                break
+
+        if not form_valid:
+            messages.error(self.request, _('An error occured. Please see the details below.'))
+        else:
+            try:
+                ocm.commit()
+            except OrderError as e:
+                messages.error(self.request, str(e))
+            else:
+                messages.success(self.request, _('The order has been changed and the user has been notified.'))
+                return self._redirect_back()
+
         return self.get(*args, **kwargs)
 
 
