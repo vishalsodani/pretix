@@ -1,7 +1,7 @@
 from collections import Counter, namedtuple
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 from django.conf import settings
 from django.db import transaction
@@ -367,7 +367,8 @@ class OrderChangeManager:
         'free_to_paid': _('You cannot change a free order to a paid order.'),
         'product_without_variation': _('You need to select a variation of the product.'),
         'quota': _('The quota {name} does not have enough capacity left to perform the operation.'),
-        'product_invalid': _('The selected product is not active or has no price set.')
+        'product_invalid': _('The selected product is not active or has no price set.'),
+        'complete_cancel': _('This operation would leave the order empty. Please cancel the order itself instead.'),
     }
     ItemOperation = namedtuple('ItemOperation', ('position', 'item', 'variation', 'price'))
     PriceOperation = namedtuple('PriceOperation', ('position', 'price'))
@@ -380,7 +381,7 @@ class OrderChangeManager:
         self._quotadiff = Counter()
         self._operations = []
 
-    def change_item(self, position: OrderPosition, item: Item, variation: ItemVariation):
+    def change_item(self, position: OrderPosition, item: Item, variation: Optional[ItemVariation]):
         if (not variation and item.has_variations) or (variation and variation.item_id != item.pk):
             raise OrderError(self.error_messages['product_without_variation'])
         price = item.default_price if variation is None else (
@@ -461,9 +462,13 @@ class OrderChangeManager:
             generate_cancellation(i)
             generate_invoice(self.order)
 
+    def _check_complete_cancel(self):
+        cancels = len([o for o in self._operations if isinstance(o, self.CancelOperation)])
+        if cancels == self.order.positions.count():
+            raise OrderError(self.error_messages['complete_cancel'])
+
     def _notify_user(self):
         # TODO: Implement
-        raise NotImplementedError()
         pass
 
     def commit(self):
@@ -474,6 +479,7 @@ class OrderChangeManager:
             with self.order.event.lock():
                 self._check_free_to_paid()
                 self._check_quotas()
+                self._check_complete_cancel()
                 self._perform_operations()
             self._recalculate_total_and_payment_fee()
             self._reissue_invoice()
