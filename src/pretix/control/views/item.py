@@ -1,30 +1,38 @@
+import json
+
 from django.contrib import messages
 from django.core.files import File
 from django.core.urlresolvers import resolve, reverse
 from django.db import transaction
-from django.forms.models import ModelMultipleChoiceField, inlineformset_factory
+from django.db.models import Count, F, Q
+from django.forms.models import inlineformset_factory
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import redirect
 from django.utils.functional import cached_property
-from django.utils.translation import ugettext_lazy as _
+from django.utils.timezone import now
+from django.utils.translation import ugettext, ugettext_lazy as _
 from django.views.generic import ListView
 from django.views.generic.base import TemplateView
-from django.views.generic.detail import SingleObjectMixin
+from django.views.generic.detail import DetailView, SingleObjectMixin
 from django.views.generic.edit import DeleteView
 
 from pretix.base.forms import I18nFormSet
 from pretix.base.models import (
-    Item, ItemCategory, ItemVariation, Question, QuestionOption, Quota,
+    CachedTicket, Item, ItemCategory, ItemVariation, Order, Question,
+    QuestionAnswer, QuestionOption, Quota, Voucher,
 )
+from pretix.base.models.event import SubEvent
+from pretix.base.models.items import ItemAddOn
 from pretix.control.forms.item import (
-    CategoryForm, ItemCreateForm, ItemUpdateForm, ItemVariationForm,
-    QuestionForm, QuestionOptionForm, QuotaForm,
+    CategoryForm, ItemAddOnForm, ItemAddOnsFormSet, ItemCreateForm,
+    ItemUpdateForm, ItemVariationForm, ItemVariationsFormSet, QuestionForm,
+    QuestionOptionForm, QuotaForm,
 )
 from pretix.control.permissions import (
     EventPermissionRequiredMixin, event_permission_required,
 )
 
-from . import CreateView, UpdateView
+from . import ChartContainingView, CreateView, PaginationMixin, UpdateView
 
 
 class ItemList(ListView):
@@ -38,6 +46,8 @@ class ItemList(ListView):
     def get_queryset(self):
         return Item.objects.filter(
             event=self.request.event
+        ).annotate(
+            var_count=Count('variations')
         ).prefetch_related("category")
 
 
@@ -65,7 +75,7 @@ def item_move(request, item, up=True):
         if item.position != i:
             item.position = i
             item.save()
-    messages.success(request, _('The order of items as been updated.'))
+    messages.success(request, _('The order of items has been updated.'))
 
 
 @event_permission_required("can_change_items")
@@ -99,7 +109,7 @@ class CategoryDelete(EventPermissionRequiredMixin, DeleteView):
         except ItemCategory.DoesNotExist:
             raise Http404(_("The requested product category does not exist."))
 
-    @transaction.atomic()
+    @transaction.atomic
     def delete(self, request, *args, **kwargs):
         self.object = self.get_object()
         for item in self.object.items.all():
@@ -134,7 +144,7 @@ class CategoryUpdate(EventPermissionRequiredMixin, UpdateView):
         except ItemCategory.DoesNotExist:
             raise Http404(_("The requested product category does not exist."))
 
-    @transaction.atomic()
+    @transaction.atomic
     def form_valid(self, form):
         messages.success(self.request, _('Your changes have been saved.'))
         if form.has_changed():
@@ -151,6 +161,10 @@ class CategoryUpdate(EventPermissionRequiredMixin, UpdateView):
             'event': self.request.event.slug,
         })
 
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
+
 
 class CategoryCreate(EventPermissionRequiredMixin, CreateView):
     model = ItemCategory
@@ -165,7 +179,7 @@ class CategoryCreate(EventPermissionRequiredMixin, CreateView):
             'event': self.request.event.slug,
         })
 
-    @transaction.atomic()
+    @transaction.atomic
     def form_valid(self, form):
         form.instance.event = self.request.event
         messages.success(self.request, _('The new category has been created.'))
@@ -173,11 +187,14 @@ class CategoryCreate(EventPermissionRequiredMixin, CreateView):
         form.instance.log_action('pretix.event.category.added', data=dict(form.cleaned_data), user=self.request.user)
         return ret
 
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
 
-class CategoryList(ListView):
+
+class CategoryList(PaginationMixin, ListView):
     model = ItemCategory
     context_object_name = 'categories'
-    paginate_by = 30
     template_name = 'pretixcontrol/items/categories.html'
 
     def get_queryset(self):
@@ -227,14 +244,13 @@ def category_move_down(request, organizer, event, category):
                     event=request.event.slug)
 
 
-class QuestionList(ListView):
+class QuestionList(PaginationMixin, ListView):
     model = Question
     context_object_name = 'questions'
-    paginate_by = 30
     template_name = 'pretixcontrol/items/questions.html'
 
     def get_queryset(self):
-        return self.request.event.questions.all()
+        return self.request.event.questions.prefetch_related('items')
 
 
 def question_move(request, question, up=True):
@@ -299,7 +315,7 @@ class QuestionDelete(EventPermissionRequiredMixin, DeleteView):
         context['dependent'] = list(self.get_object().items.all())
         return context
 
-    @transaction.atomic()
+    @transaction.atomic
     def delete(self, request, *args, **kwargs):
         self.object = self.get_object()
         success_url = self.get_success_url()
@@ -325,8 +341,8 @@ class QuestionMixin:
             can_order=False, can_delete=True, extra=0
         )
         return formsetclass(self.request.POST if self.request.method == "POST" else None,
-                            queryset=(QuestionOption.objects.filter(question=self.get_object())
-                                      if self.get_object() else QuestionOption.objects.none()),
+                            queryset=(QuestionOption.objects.filter(question=self.object)
+                                      if self.object else QuestionOption.objects.none()),
                             event=self.request.event)
 
     def save_formset(self, obj):
@@ -375,10 +391,80 @@ class QuestionMixin:
         return ctx
 
 
+class QuestionView(EventPermissionRequiredMixin, QuestionMixin, ChartContainingView, DetailView):
+    model = Question
+    template_name = 'pretixcontrol/items/question.html'
+    permission = 'can_change_items'
+    template_name_field = 'question'
+
+    def get_answer_statistics(self):
+        qs = QuestionAnswer.objects.filter(
+            question=self.object, orderposition__isnull=False,
+            orderposition__order__event=self.request.event
+        )
+        if self.request.GET.get("status", "") != "":
+            s = self.request.GET.get("status", "")
+            if s == 'o':
+                qs = qs.filter(orderposition__order__status=Order.STATUS_PENDING,
+                               expires__lt=now().replace(hour=0, minute=0, second=0))
+            elif s == 'ne':
+                qs = qs.filter(orderposition__order__status__in=[Order.STATUS_PENDING, Order.STATUS_EXPIRED])
+            else:
+                qs = qs.filter(orderposition__order__status=s)
+        if self.request.GET.get("item", "") != "":
+            i = self.request.GET.get("item", "")
+            qs = qs.filter(orderposition__item_id__in=(i,))
+
+        if self.object.type == Question.TYPE_FILE:
+            qs = [
+                {
+                    'answer': ugettext('File uploaded'),
+                    'count': qs.filter(file__isnull=False).count()
+                }
+            ]
+        elif self.object.type in (Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE):
+            qs = qs.order_by('options').values('options', 'options__answer')\
+                   .annotate(count=Count('id')).order_by('-count')
+            for a in qs:
+                a['answer'] = str(a['options__answer'])
+                del a['options__answer']
+        else:
+            qs = qs.order_by('answer').values('answer').annotate(count=Count('id')).order_by('-count')
+
+            if self.object.type == Question.TYPE_BOOLEAN:
+                for a in qs:
+                    a['answer'] = ugettext('Yes') if a['answer'] == 'True' else ugettext('No')
+                    a['answer_bool'] = a['answer'] == 'True'
+
+        return list(qs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data()
+        ctx['items'] = self.object.items.all()
+        stats = self.get_answer_statistics()
+        ctx['stats'] = stats
+        ctx['stats_json'] = json.dumps(stats)
+        return ctx
+
+    def get_object(self, queryset=None) -> Question:
+        try:
+            return self.request.event.questions.get(
+                id=self.kwargs['question']
+            )
+        except Question.DoesNotExist:
+            raise Http404(_("The requested question does not exist."))
+
+    def get_success_url(self) -> str:
+        return reverse('control:event.items.questions', kwargs={
+            'organizer': self.request.event.organizer.slug,
+            'event': self.request.event.slug,
+        })
+
+
 class QuestionUpdate(EventPermissionRequiredMixin, QuestionMixin, UpdateView):
     model = Question
     form_class = QuestionForm
-    template_name = 'pretixcontrol/items/question.html'
+    template_name = 'pretixcontrol/items/question_edit.html'
     permission = 'can_change_items'
     context_object_name = 'question'
 
@@ -390,7 +476,7 @@ class QuestionUpdate(EventPermissionRequiredMixin, QuestionMixin, UpdateView):
         except Question.DoesNotExist:
             raise Http404(_("The requested question does not exist."))
 
-    @transaction.atomic()
+    @transaction.atomic
     def form_valid(self, form):
         if form.cleaned_data.get('type') in ('M', 'C'):
             if not self.save_formset(self.get_object()):
@@ -411,11 +497,15 @@ class QuestionUpdate(EventPermissionRequiredMixin, QuestionMixin, UpdateView):
             'event': self.request.event.slug,
         })
 
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
+
 
 class QuestionCreate(EventPermissionRequiredMixin, QuestionMixin, CreateView):
     model = Question
     form_class = QuestionForm
-    template_name = 'pretixcontrol/items/question.html'
+    template_name = 'pretixcontrol/items/question_edit.html'
     permission = 'can_change_items'
     context_object_name = 'question'
 
@@ -433,7 +523,11 @@ class QuestionCreate(EventPermissionRequiredMixin, QuestionMixin, CreateView):
     def get_object(self, **kwargs):
         return None
 
-    @transaction.atomic()
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
+
+    @transaction.atomic
     def form_valid(self, form):
         if form.cleaned_data.get('type') in ('M', 'C'):
             if not self.formset.is_valid():
@@ -449,64 +543,25 @@ class QuestionCreate(EventPermissionRequiredMixin, QuestionMixin, CreateView):
         return ret
 
 
-class QuotaList(ListView):
+class QuotaList(PaginationMixin, ListView):
     model = Quota
     context_object_name = 'quotas'
-    paginate_by = 30
     template_name = 'pretixcontrol/items/quotas.html'
 
     def get_queryset(self):
-        return Quota.objects.filter(
+        qs = Quota.objects.filter(
             event=self.request.event
         ).prefetch_related("items")
+        if self.request.GET.get("subevent", "") != "":
+            s = self.request.GET.get("subevent", "")
+            qs = qs.filter(subevent_id=s)
+        return qs
 
 
-class QuotaEditorMixin:
-    @cached_property
-    def items(self) -> "List[Item]":
-        return list(self.request.event.items.all().prefetch_related("variations"))
-
-    def get_form(self, form_class=QuotaForm):
-        if not hasattr(self, '_form'):
-            kwargs = self.get_form_kwargs()
-            kwargs['items'] = self.items
-            self._form = form_class(**kwargs)
-        return self._form
-
-    def get_context_data(self, *args, **kwargs) -> dict:
-        context = super().get_context_data(*args, **kwargs)
-        context['items'] = self.items
-        for item in context['items']:
-            item.field = self.get_form(QuotaForm)['item_%s' % item.id]
-        return context
-
-    @transaction.atomic()
-    def form_valid(self, form):
-        res = super().form_valid(form)
-        items = self.object.items.all()
-        variations = self.object.variations.all()
-        selected_variations = []
-        self.object = form.instance
-        for item in self.items:
-            field = form.fields['item_%s' % item.id]
-            data = form.cleaned_data['item_%s' % item.id]
-            if isinstance(field, ModelMultipleChoiceField):
-                for v in data:
-                    selected_variations.append(v)
-            if data and item not in items:
-                self.object.items.add(item)
-            elif not data and item in items:
-                self.object.items.remove(item)
-
-        self.object.variations.add(*[v for v in selected_variations if v not in variations])
-        self.object.variations.remove(*[v for v in variations if v not in selected_variations])
-        return res
-
-
-class QuotaCreate(EventPermissionRequiredMixin, QuotaEditorMixin, CreateView):
+class QuotaCreate(EventPermissionRequiredMixin, CreateView):
     model = Quota
     form_class = QuotaForm
-    template_name = 'pretixcontrol/items/quota.html'
+    template_name = 'pretixcontrol/items/quota_edit.html'
     permission = 'can_change_items'
     context_object_name = 'quota'
 
@@ -516,7 +571,7 @@ class QuotaCreate(EventPermissionRequiredMixin, QuotaEditorMixin, CreateView):
             'event': self.request.event.slug,
         })
 
-    @transaction.atomic()
+    @transaction.atomic
     def form_valid(self, form):
         form.instance.event = self.request.event
         messages.success(self.request, _('The new quota has been created.'))
@@ -524,13 +579,70 @@ class QuotaCreate(EventPermissionRequiredMixin, QuotaEditorMixin, CreateView):
         form.instance.log_action('pretix.event.quota.added', user=self.request.user, data=dict(form.cleaned_data))
         return ret
 
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
 
-class QuotaUpdate(EventPermissionRequiredMixin, QuotaEditorMixin, UpdateView):
+
+class QuotaView(ChartContainingView, DetailView):
     model = Quota
-    form_class = QuotaForm
     template_name = 'pretixcontrol/items/quota.html'
-    permission = 'can_change_items'
     context_object_name = 'quota'
+
+    def get_context_data(self, *args, **kwargs):
+        ctx = super().get_context_data()
+
+        avail = self.object.availability()
+        ctx['avail'] = avail
+
+        data = [
+            {
+                'label': ugettext('Paid orders'),
+                'value': self.object.count_paid_orders(),
+                'sum': True,
+            },
+            {
+                'label': ugettext('Pending orders'),
+                'value': self.object.count_pending_orders(),
+                'sum': True,
+            },
+            {
+                'label': ugettext('Vouchers'),
+                'value': self.object.count_blocking_vouchers(),
+                'sum': True,
+            },
+            {
+                'label': ugettext('Current user\'s carts'),
+                'value': self.object.count_in_cart(),
+                'sum': True,
+            },
+            {
+                'label': ugettext('Waiting list'),
+                'value': self.object.count_waiting_list_pending(),
+                'sum': False,
+            },
+        ]
+        ctx['quota_table_rows'] = list(data)
+
+        sum_values = sum([d['value'] for d in data if d['sum']])
+
+        if self.object.size is not None:
+            data.append({
+                'label': ugettext('Current availability'),
+                'value': avail[1]
+            })
+
+        ctx['quota_chart_data'] = json.dumps(data)
+        ctx['quota_overbooked'] = sum_values - self.object.size if self.object.size is not None else 0
+
+        ctx['has_ignore_vouchers'] = Voucher.objects.filter(
+            Q(allow_ignore_quota=True) &
+            Q(Q(valid_until__isnull=True) | Q(valid_until__gte=now())) &
+            Q(Q(self.object._position_lookup) | Q(quota=self.object)) &
+            Q(redeemed__lt=F('max_usages'))
+        ).exists()
+
+        return ctx
 
     def get_object(self, queryset=None) -> Quota:
         try:
@@ -540,7 +652,27 @@ class QuotaUpdate(EventPermissionRequiredMixin, QuotaEditorMixin, UpdateView):
         except Quota.DoesNotExist:
             raise Http404(_("The requested quota does not exist."))
 
-    @transaction.atomic()
+
+class QuotaUpdate(EventPermissionRequiredMixin, UpdateView):
+    model = Quota
+    form_class = QuotaForm
+    template_name = 'pretixcontrol/items/quota_edit.html'
+    permission = 'can_change_items'
+    context_object_name = 'quota'
+
+    def get_context_data(self, *args, **kwargs):
+        ctx = super().get_context_data()
+        return ctx
+
+    def get_object(self, queryset=None) -> Quota:
+        try:
+            return self.request.event.quotas.get(
+                id=self.kwargs['quota']
+            )
+        except Quota.DoesNotExist:
+            raise Http404(_("The requested quota does not exist."))
+
+    @transaction.atomic
     def form_valid(self, form):
         messages.success(self.request, _('Your changes have been saved.'))
         if form.has_changed():
@@ -549,13 +681,35 @@ class QuotaUpdate(EventPermissionRequiredMixin, QuotaEditorMixin, UpdateView):
                     k: form.cleaned_data.get(k) for k in form.changed_data
                 }
             )
+            if ((form.initial.get('subevent') and not form.instance.subevent)
+                    or (form.instance.subevent and form.initial.get('subevent') != form.instance.subevent.pk)):
+
+                if form.initial.get('subevent'):
+                    se = SubEvent.objects.get(event=self.request.event, pk=form.initial.get('subevent'))
+                    se.log_action(
+                        'pretix.subevent.quota.deleted', user=self.request.user, data={
+                            'id': form.instance.pk
+                        }
+                    )
+                if form.instance.subevent:
+                    form.instance.subevent.log_action(
+                        'pretix.subevent.quota.added', user=self.request.user, data={
+                            'id': form.instance.pk
+                        }
+                    )
+            form.instance.rebuild_cache()
         return super().form_valid(form)
 
     def get_success_url(self) -> str:
-        return reverse('control:event.items.quotas', kwargs={
+        return reverse('control:event.items.quotas.show', kwargs={
             'organizer': self.request.event.organizer.slug,
             'event': self.request.event.slug,
+            'quota': self.object.pk
         })
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
 
 
 class QuotaDelete(EventPermissionRequiredMixin, DeleteView):
@@ -577,7 +731,7 @@ class QuotaDelete(EventPermissionRequiredMixin, DeleteView):
         context['dependent'] = list(self.get_object().items.all())
         return context
 
-    @transaction.atomic()
+    @transaction.atomic
     def delete(self, request, *args, **kwargs):
         self.object = self.get_object()
         success_url = self.get_success_url()
@@ -621,9 +775,17 @@ class ItemCreate(EventPermissionRequiredMixin, CreateView):
             'item': self.object.id,
         })
 
-    @transaction.atomic()
+    def get_initial(self):
+        initial = super().get_initial()
+        trs = list(self.request.event.tax_rules.all())
+        if len(trs) == 1:
+            initial['tax_rule'] = trs[0]
+        return initial
+
+    @transaction.atomic
     def form_valid(self, form):
         messages.success(self.request, _('Your changes have been saved.'))
+
         ret = super().form_valid(form)
         form.instance.log_action('pretix.event.item.added', user=self.request.user, data={
             k: (form.cleaned_data.get(k).name
@@ -642,6 +804,10 @@ class ItemCreate(EventPermissionRequiredMixin, CreateView):
         kwargs.update({'instance': newinst})
         return kwargs
 
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
+
 
 class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, UpdateView):
     form_class = ItemUpdateForm
@@ -655,7 +821,7 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, UpdateVie
             'item': self.get_object().id,
         })
 
-    @transaction.atomic()
+    @transaction.atomic
     def form_valid(self, form):
         messages.success(self.request, _('Your changes have been saved.'))
         if form.has_changed():
@@ -667,7 +833,12 @@ class ItemUpdateGeneral(ItemDetailMixin, EventPermissionRequiredMixin, UpdateVie
                     for k in form.changed_data
                 }
             )
+            CachedTicket.objects.filter(order_position__item=self.item).delete()
         return super().form_valid(form)
+
+    def form_invalid(self, form):
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
+        return super().form_invalid(form)
 
 
 class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView):
@@ -682,7 +853,7 @@ class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView
     def formset(self):
         formsetclass = inlineformset_factory(
             Item, ItemVariation,
-            form=ItemVariationForm, formset=I18nFormSet,
+            form=ItemVariationForm, formset=ItemVariationsFormSet,
             can_order=True, can_delete=True, extra=0
         )
         return formsetclass(self.request.POST if self.request.method == "POST" else None,
@@ -697,6 +868,7 @@ class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView
                         continue
                     self.get_object().log_action(
                         'pretix.event.item.variation.deleted', user=self.request.user, data={
+                            'value': form.instance.value,
                             'id': form.instance.pk
                         }
                     )
@@ -714,6 +886,7 @@ class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView
                     form.save()
                     if form.has_changed():
                         change_data = {k: form.cleaned_data.get(k) for k in form.changed_data}
+                        change_data['value'] = form.instance.value
                         change_data['id'] = form.instance.pk
                         self.get_object().log_action(
                             'pretix.event.item.variation.changed' if not created else
@@ -723,6 +896,7 @@ class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView
 
                 messages.success(self.request, _('Your changes have been saved.'))
                 return redirect(self.get_success_url())
+        messages.error(self.request, _('We could not save your changes. See below for details.'))
         return self.get(request, *args, **kwargs)
 
     def get_success_url(self) -> str:
@@ -734,6 +908,89 @@ class ItemVariations(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView
 
     def get_context_data(self, **kwargs) -> dict:
         self.object = self.get_object()
+        context = super().get_context_data(**kwargs)
+        context['formset'] = self.formset
+        return context
+
+
+class ItemAddOns(ItemDetailMixin, EventPermissionRequiredMixin, TemplateView):
+    permission = 'can_change_items'
+    template_name = 'pretixcontrol/item/addons.html'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.item = None
+
+    @cached_property
+    def formset(self):
+        formsetclass = inlineformset_factory(
+            Item, ItemAddOn,
+            form=ItemAddOnForm, formset=ItemAddOnsFormSet,
+            can_order=True, can_delete=True, extra=0
+        )
+        return formsetclass(self.request.POST if self.request.method == "POST" else None,
+                            queryset=ItemAddOn.objects.filter(base_item=self.get_object()),
+                            event=self.request.event)
+
+    def post(self, request, *args, **kwargs):
+        with transaction.atomic():
+            if self.formset.is_valid():
+                for form in self.formset.deleted_forms:
+                    if not form.instance.pk:
+                        continue
+                    self.get_object().log_action(
+                        'pretix.event.item.addons.removed', user=self.request.user, data={
+                            'category': form.instance.addon_category.pk
+                        }
+                    )
+                    form.instance.delete()
+                    form.instance.pk = None
+
+                forms = self.formset.ordered_forms + [
+                    ef for ef in self.formset.extra_forms
+                    if ef not in self.formset.ordered_forms and ef not in self.formset.deleted_forms
+                ]
+                for i, form in enumerate(forms):
+                    form.instance.base_item = self.get_object()
+                    form.instance.position = i
+                    created = not form.instance.pk
+                    form.save()
+                    if form.has_changed():
+                        change_data = {k: form.cleaned_data.get(k) for k in form.changed_data}
+                        change_data['id'] = form.instance.pk
+                        self.get_object().log_action(
+                            'pretix.event.item.addons.changed' if not created else
+                            'pretix.event.item.addons.added',
+                            user=self.request.user, data=change_data
+                        )
+
+                messages.success(self.request, _('Your changes have been saved.'))
+                return redirect(self.get_success_url())
+        return self.get(request, *args, **kwargs)
+
+    def get(self, request, *args, **kwargs):
+        if self.get_object().category and self.get_object().category.is_addon:
+            messages.error(self.request, _('You cannot add addons to a product that is only available as an add-on '
+                                           'itself.'))
+            return redirect(self.get_previous_url())
+
+        return super().get(request, *args, **kwargs)
+
+    def get_previous_url(self) -> str:
+        return reverse('control:event.item', kwargs={
+            'organizer': self.request.event.organizer.slug,
+            'event': self.request.event.slug,
+            'item': self.get_object().id,
+        })
+
+    def get_success_url(self) -> str:
+        return reverse('control:event.item.addons', kwargs={
+            'organizer': self.request.event.organizer.slug,
+            'event': self.request.event.slug,
+            'item': self.get_object().id,
+        })
+
+    def get_context_data(self, **kwargs) -> dict:
         context = super().get_context_data(**kwargs)
         context['formset'] = self.formset
         return context

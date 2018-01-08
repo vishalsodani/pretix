@@ -1,6 +1,15 @@
-from tests.base import SoupTest, extract_form_fields
+import time
 
-from pretix.base.models import User
+import pytest
+from django.utils.timezone import now
+from django_otp.oath import TOTP
+from django_otp.plugins.otp_static.models import StaticDevice
+from django_otp.plugins.otp_totp.models import TOTPDevice
+from tests.base import SoupTest, extract_form_fields
+from u2flib_server.jsapi import JSONDict
+
+from pretix.base.models import Event, Organizer, U2FDevice, User
+from pretix.testutils.mock import mocker_context
 
 
 class UserSettingsTest(SoupTest):
@@ -14,18 +23,15 @@ class UserSettingsTest(SoupTest):
     def save(self, data):
         form_data = self.form_data.copy()
         form_data.update(data)
-        print(form_data)
         return self.post_doc('/control/settings', form_data)
 
     def test_set_name(self):
         doc = self.save({
-            'givenname': 'Peter',
-            'familyname': 'Miller'
+            'fullname': 'Peter Miller',
         })
         assert doc.select(".alert-success")
         self.user = User.objects.get(pk=self.user.pk)
-        assert self.user.givenname == 'Peter'
-        assert self.user.familyname == 'Miller'
+        assert self.user.fullname == 'Peter Miller'
 
     def test_change_email_require_password(self):
         doc = self.save({
@@ -106,3 +112,289 @@ class UserSettingsTest(SoupTest):
         pw = self.user.password
         self.user = User.objects.get(pk=self.user.pk)
         assert self.user.password == pw
+
+
+@pytest.fixture
+def class_monkeypatch(request, monkeypatch):
+    request.cls.monkeypatch = monkeypatch
+
+
+@pytest.mark.usefixtures("class_monkeypatch")
+class UserSettings2FATest(SoupTest):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user('dummy@dummy.dummy', 'dummy')
+        self.client.login(email='dummy@dummy.dummy', password='dummy')
+        session = self.client.session
+        session['pretix_auth_login_time'] = int(time.time())
+        session.save()
+
+    def test_require_reauth(self):
+        session = self.client.session
+        session['pretix_auth_login_time'] = int(time.time()) - 3600 * 2
+        session.save()
+
+        response = self.client.get('/control/settings/2fa/')
+        self.assertIn('/control/reauth', response['Location'])
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.post('/control/reauth/?next=/control/settings/2fa/', {
+            'password': 'dummy'
+        })
+        self.assertIn('/control/settings/2fa/', response['Location'])
+        self.assertEqual(response.status_code, 302)
+
+    def test_enable_require_device(self):
+        r = self.client.post('/control/settings/2fa/enable', follow=True)
+        assert 'alert-danger' in r.rendered_content
+        self.user.refresh_from_db()
+        assert not self.user.require_2fa
+
+    def test_enable(self):
+        U2FDevice.objects.create(user=self.user, name='Test')
+        r = self.client.post('/control/settings/2fa/enable', follow=True)
+        assert 'alert-success' in r.rendered_content
+        self.user.refresh_from_db()
+        assert self.user.require_2fa
+
+    def test_disable(self):
+        self.user.require_2fa = True
+        self.user.save()
+        r = self.client.post('/control/settings/2fa/disable', follow=True)
+        assert 'alert-success' in r.rendered_content
+        self.user.refresh_from_db()
+        assert not self.user.require_2fa
+
+    def test_gen_emergency(self):
+        self.client.get('/control/settings/2fa/')
+        d = StaticDevice.objects.get(user=self.user, name='emergency')
+        assert d.token_set.count() == 10
+        old_tokens = set(t.token for t in d.token_set.all())
+        self.client.post('/control/settings/2fa/regenemergency')
+        new_tokens = set(t.token for t in d.token_set.all())
+        assert d.token_set.count() == 10
+        assert old_tokens != new_tokens
+
+    def test_delete_u2f(self):
+        d = U2FDevice.objects.create(user=self.user, name='Test')
+        self.client.get('/control/settings/2fa/u2f/{}/delete'.format(d.pk))
+        self.client.post('/control/settings/2fa/u2f/{}/delete'.format(d.pk))
+        assert not U2FDevice.objects.exists()
+
+    def test_delete_totp(self):
+        d = TOTPDevice.objects.create(user=self.user, name='Test')
+        self.client.get('/control/settings/2fa/totp/{}/delete'.format(d.pk))
+        self.client.post('/control/settings/2fa/totp/{}/delete'.format(d.pk))
+        assert not TOTPDevice.objects.exists()
+
+    def test_create_u2f_require_https(self):
+        r = self.client.post('/control/settings/2fa/add', {
+            'devicetype': 'u2f',
+            'name': 'Foo'
+        })
+        assert 'alert-danger' in r.rendered_content
+
+    def test_create_u2f(self):
+        with mocker_context() as mocker:
+            mocker.patch('django.http.request.HttpRequest.is_secure')
+            self.client.post('/control/settings/2fa/add', {
+                'devicetype': 'u2f',
+                'name': 'Foo'
+            })
+            d = U2FDevice.objects.first()
+            assert d.name == 'Foo'
+            assert not d.confirmed
+
+    def test_create_totp(self):
+        self.client.post('/control/settings/2fa/add', {
+            'devicetype': 'totp',
+            'name': 'Foo'
+        })
+        d = TOTPDevice.objects.first()
+        assert d.name == 'Foo'
+
+    def test_confirm_totp(self):
+        self.client.post('/control/settings/2fa/add', {
+            'devicetype': 'totp',
+            'name': 'Foo'
+        }, follow=True)
+        d = TOTPDevice.objects.first()
+        totp = TOTP(d.bin_key, d.step, d.t0, d.digits, d.drift)
+        totp.time = time.time()
+        r = self.client.post('/control/settings/2fa/totp/{}/confirm'.format(d.pk), {
+            'token': str(totp.token())
+        }, follow=True)
+        d.refresh_from_db()
+        assert d.confirmed
+        assert 'alert-success' in r.rendered_content
+
+    def test_confirm_totp_failed(self):
+        self.client.post('/control/settings/2fa/add', {
+            'devicetype': 'totp',
+            'name': 'Foo'
+        }, follow=True)
+        d = TOTPDevice.objects.first()
+        totp = TOTP(d.bin_key, d.step, d.t0, d.digits, d.drift)
+        totp.time = time.time()
+        r = self.client.post('/control/settings/2fa/totp/{}/confirm'.format(d.pk), {
+            'token': str(totp.token() - 2)
+        }, follow=True)
+        assert 'alert-danger' in r.rendered_content
+        d.refresh_from_db()
+        assert not d.confirmed
+
+    def test_confirm_u2f_failed(self):
+        with mocker_context() as mocker:
+            mocker.patch('django.http.request.HttpRequest.is_secure')
+            self.client.post('/control/settings/2fa/add', {
+                'devicetype': 'u2f',
+                'name': 'Foo'
+            }, follow=True)
+        d = U2FDevice.objects.first()
+        r = self.client.post('/control/settings/2fa/u2f/{}/confirm'.format(d.pk), {
+            'token': 'FOO'
+        }, follow=True)
+        assert 'alert-danger' in r.rendered_content
+        d.refresh_from_db()
+        assert not d.confirmed
+
+    def test_confirm_u2f_success(self):
+        with mocker_context() as mocker:
+            mocker.patch('django.http.request.HttpRequest.is_secure')
+            self.client.post('/control/settings/2fa/add', {
+                'devicetype': 'u2f',
+                'name': 'Foo'
+            }, follow=True)
+
+        m = self.monkeypatch
+        m.setattr("u2flib_server.u2f.complete_register", lambda *args, **kwargs: (JSONDict({}), None))
+
+        d = U2FDevice.objects.first()
+        r = self.client.post('/control/settings/2fa/u2f/{}/confirm'.format(d.pk), {
+            'token': 'FOO'
+        }, follow=True)
+        d.refresh_from_db()
+        assert d.confirmed
+        assert 'alert-success' in r.rendered_content
+
+        m.undo()
+
+
+class UserSettingsNotificationsTest(SoupTest):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user('dummy@dummy.dummy', 'dummy')
+        self.client.login(email='dummy@dummy.dummy', password='dummy')
+
+        o = Organizer.objects.create(name='Dummy', slug='dummy')
+        self.event = Event.objects.create(
+            organizer=o, name='Dummy', slug='dummy',
+            date_from=now(), plugins='pretix.plugins.banktransfer'
+        )
+        t = o.teams.create(can_change_orders=True, all_events=True)
+        t.members.add(self.user)
+
+    def test_toggle_all(self):
+        assert self.user.notifications_send
+        self.client.post('/control/settings/notifications/', {
+            'notifications_send': 'off'
+        })
+        self.user.refresh_from_db()
+        assert not self.user.notifications_send
+        self.client.post('/control/settings/notifications/', {
+            'notifications_send': 'on'
+        })
+        self.user.refresh_from_db()
+        assert self.user.notifications_send
+
+    def test_global_enable(self):
+        self.client.post('/control/settings/notifications/', {
+            'mail:pretix.event.order.placed': 'on'
+        })
+        assert self.user.notification_settings.get(
+            event__isnull=True, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is True
+
+    def test_global_disable(self):
+        self.user.notification_settings.create(
+            event=None, method='mail', action_type='pretix.event.order.placed', enabled=True
+        )
+        self.client.post('/control/settings/notifications/', {
+            'mail:pretix.event.order.placed': 'off'
+        })
+        assert self.user.notification_settings.get(
+            event__isnull=True, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is False
+
+    def test_event_enabled_disable(self):
+        self.user.notification_settings.create(
+            event=self.event, method='mail', action_type='pretix.event.order.placed', enabled=True
+        )
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'off'
+        })
+        assert self.user.notification_settings.get(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is False
+
+    def test_event_global_disable(self):
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'off'
+        })
+        assert self.user.notification_settings.get(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is False
+
+    def test_event_disabled_enable(self):
+        self.user.notification_settings.create(
+            event=self.event, method='mail', action_type='pretix.event.order.placed', enabled=False
+        )
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'on'
+        })
+        assert self.user.notification_settings.get(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is True
+
+    def test_event_global_enable(self):
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'on'
+        })
+        assert self.user.notification_settings.get(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).enabled is True
+
+    def test_event_enabled_global(self):
+        self.user.notification_settings.create(
+            event=self.event, method='mail', action_type='pretix.event.order.placed', enabled=True
+        )
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'global'
+        })
+        assert not self.user.notification_settings.filter(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).exists()
+
+    def test_event_disabled_global(self):
+        self.user.notification_settings.create(
+            event=self.event, method='mail', action_type='pretix.event.order.placed', enabled=False
+        )
+        self.client.post('/control/settings/notifications/?event={}'.format(self.event.pk), {
+            'mail:pretix.event.order.placed': 'global'
+        })
+        assert not self.user.notification_settings.filter(
+            event=self.event, method='mail', action_type='pretix.event.order.placed'
+        ).exists()
+
+    def test_disable_all_via_link(self):
+        assert self.user.notifications_send
+        self.client.get('/control/settings/notifications/off/{}/{}/'.format(self.user.pk, self.user.notifications_token))
+        self.user.refresh_from_db()
+        assert not self.user.notifications_send
+
+    def test_disable_all_via_link_anonymous(self):
+        self.client.logout()
+        assert self.user.notifications_send
+        self.client.get('/control/settings/notifications/off/{}/{}/'.format(self.user.pk, self.user.notifications_token))
+        self.user.refresh_from_db()
+        assert not self.user.notifications_send

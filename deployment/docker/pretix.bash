@@ -2,6 +2,7 @@
 cd /pretix/src
 export DJANGO_SETTINGS_MODULE=production_settings
 export DATA_DIR=/data/
+export HOME=/pretix
 NUM_WORKERS=10
 
 if [ ! -d /data/logs ]; then
@@ -33,7 +34,7 @@ fi
 
 if [ "$1" == "taskworker" ]; then
     export C_FORCE_ROOT=True
-    exec celery -A pretix worker -l info
+    exec celery -A pretix.celery_app worker -l info
 fi
 
 if [ "$1" == "shell" ]; then

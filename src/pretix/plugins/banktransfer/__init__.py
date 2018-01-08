@@ -3,7 +3,6 @@ from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
 
 from pretix import __version__ as version
-from pretix.base.plugins import PluginType
 
 
 class BankTransferApp(AppConfig):
@@ -11,7 +10,6 @@ class BankTransferApp(AppConfig):
     verbose_name = _("Bank transfer")
 
     class PretixPluginMeta:
-        type = PluginType.PAYMENT
         name = _("Bank transfer")
         author = _("the pretix team")
         version = version
@@ -20,6 +18,7 @@ class BankTransferApp(AppConfig):
 
     def ready(self):
         from . import signals  # NOQA
+        from . import tasks  # NOQA
 
     @cached_property
     def compatibility_warnings(self):
@@ -28,10 +27,6 @@ class BankTransferApp(AppConfig):
             import chardet  # NOQA
         except ImportError:
             errs.append(_("Install the python package 'chardet' for better CSV import capabilities."))
-        try:
-            import defusedxml  # NOQA
-        except ImportError:
-            errs.append(_("Please install the python package 'defusedxml' for security reasons."))
         return errs
 
 

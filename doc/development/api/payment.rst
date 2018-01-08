@@ -62,6 +62,8 @@ The provider class
 
    .. automethod:: settings_content_render
 
+   .. automethod:: render_invoice_text
+
    .. automethod:: payment_form_render
 
    .. automethod:: payment_form
@@ -86,9 +88,11 @@ The provider class
 
       This is an abstract method, you **must** override this!
 
+   .. automethod:: order_change_allowed
+
    .. automethod:: order_can_retry
 
-   .. automethod:: retry_prepare
+   .. automethod:: order_prepare
 
    .. automethod:: order_paid_render
 

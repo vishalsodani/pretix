@@ -1,12 +1,18 @@
 import random
 
 from django.core.cache import cache as django_cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils.timezone import now
 
 from pretix.base.models import Event, Organizer
 
 
+@override_settings(CACHES={
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+    }
+})
 class CacheTest(TestCase):
     """
     This test case tests the invalidation of the event related
@@ -33,7 +39,7 @@ class CacheTest(TestCase):
 
     def test_longkey(self):
         self.cache.set(self.testkey * 100, "foo")
-        self.assertEquals(self.cache.get(self.testkey * 100), "foo")
+        self.assertEqual(self.cache.get(self.testkey * 100), "foo")
 
     def test_invalidation(self):
         self.cache.set(self.testkey, "foo")
@@ -46,4 +52,4 @@ class CacheTest(TestCase):
             'b': 'bar',
         }
         self.cache.set_many(inp)
-        self.assertEquals(inp, self.cache.get_many(inp.keys()))
+        self.assertEqual(inp, self.cache.get_many(inp.keys()))

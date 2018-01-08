@@ -1,6 +1,9 @@
 import os
 
 from django import forms
+from django.utils.formats import get_format
+from django.utils.html import conditional_escape
+from django.utils.timezone import now
 from django.utils.translation import ugettext_lazy as _
 
 from ...base.forms import I18nModelForm
@@ -57,7 +60,22 @@ def selector(values, prop):
     ]
 
 
+class ClearableBasenameFileInput(forms.ClearableFileInput):
+
+    def get_template_substitution_values(self, value):
+        """
+        Return value-related substitutions.
+        """
+        bname = os.path.basename(value.name)
+        return {
+            'initial': conditional_escape(bname),
+            'initial_url': conditional_escape(value.url),
+        }
+
+
 class ExtFileField(forms.FileField):
+    widget = ClearableBasenameFileInput
+
     def __init__(self, *args, **kwargs):
         ext_whitelist = kwargs.pop("ext_whitelist")
         self.ext_whitelist = [i.lower() for i in ext_whitelist]
@@ -72,3 +90,44 @@ class ExtFileField(forms.FileField):
             if ext not in self.ext_whitelist:
                 raise forms.ValidationError(_("Filetype not allowed!"))
         return data
+
+
+class SlugWidget(forms.TextInput):
+    template_name = 'pretixcontrol/slug_widget.html'
+    prefix = ''
+
+    def get_context(self, name, value, attrs):
+        ctx = super().get_context(name, value, attrs)
+        ctx['pre'] = self.prefix
+        return ctx
+
+
+class SplitDateTimePickerWidget(forms.SplitDateTimeWidget):
+
+    def __init__(self, attrs=None, date_format=None, time_format=None):
+        attrs = attrs or {}
+        if 'placeholder' in attrs:
+            del attrs['placeholder']
+        date_attrs = dict(attrs)
+        time_attrs = dict(attrs)
+        date_attrs.setdefault('class', 'form-control splitdatetimepart')
+        time_attrs.setdefault('class', 'form-control splitdatetimepart')
+        date_attrs['class'] += ' datepickerfield'
+        time_attrs['class'] += ' timepickerfield'
+        time_attrs['class'] += ' timepickerfield'
+
+        df = date_format or get_format('DATE_INPUT_FORMATS')[0]
+        date_attrs['placeholder'] = now().replace(
+            year=2000, month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        ).strftime(df)
+        tf = time_format or get_format('TIME_INPUT_FORMATS')[0]
+        time_attrs['placeholder'] = now().replace(
+            year=2000, month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+        ).strftime(tf)
+
+        widgets = (
+            forms.DateInput(attrs=date_attrs, format=date_format),
+            forms.TimeInput(attrs=time_attrs, format=time_format),
+        )
+        # Skip one hierarchy level
+        forms.MultiWidget.__init__(self, widgets, attrs)

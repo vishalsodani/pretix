@@ -2,6 +2,8 @@
 
 .. _`config`:
 
+.. spelling:: Galera
+
 Configuration file
 ==================
 
@@ -10,13 +12,16 @@ at the following locations. It will try to read the file from the specified path
 the following order. The file that is found *last* will override the settings from
 the files found before.
 
-1. ``/etc/pretix/pretix.cfg``
-2. ``~/.pretix.cfg``
-3. ``pretix.cfg`` in the current working directory
+1. ``PREFIX_CONFIG_FILE`` environment variable
+2. ``/etc/pretix/pretix.cfg``
+3. ``~/.pretix.cfg``
+4. ``pretix.cfg`` in the current working directory
 
 The file is expected to be in the INI format as specified in the `Python documentation`_.
 
-The config file may contain the following sections (all settings are optional and have default values).
+The config file may contain the following sections (all settings are optional and have
+default values). We suggest that you start from the examples given in one of the
+installation tutorials.
 
 pretix settings
 ---------------
@@ -42,7 +47,7 @@ Example::
 
 ``datadir``
     The local path to a data directory that will be used for storing user uploads and similar
-    data. Defaults to thea value of the environment variable ``DATA_DIR`` or ``data``.
+    data. Defaults to the value of the environment variable ``DATA_DIR`` or ``data``.
 
 ``plugins_default``
     A comma-separated list of plugins that are enabled by default for all new events.
@@ -56,6 +61,14 @@ Example::
 
 ``password_reset``
     Enables or disables password reset. Defaults to ``on``.
+
+``long_sessions``
+    Enables or disables the "keep me logged in" button. Defaults to ``on``.
+
+``ecb_rates``
+    By default, pretix periodically downloads a XML file from the European Central Bank to retrieve exchange rates
+    that are used to print tax amounts in the customer currency on invoices for some currencies. Set to ``off`` to
+    disable this feature. Defaults to ``on``.
 
 
 Locale settings
@@ -87,7 +100,7 @@ Example::
     port=3306
 
 ``backend``
-    One of ``mysql``, ``sqlite3``, ``oracle`` and ``postgresql_psycopg2``.
+    One of ``mysql``, ``sqlite3``, ``oracle`` and ``postgresql``.
     Default: ``sqlite3``.
 
     If you use MySQL, be sure to create your database using
@@ -99,6 +112,10 @@ Example::
 
 ``user``, ``password``, ``host``, ``port``
     Connection details for the database connection. Empty by default.
+
+``galera``
+    Indicates if the database backend is a MySQL/MariaDB Galera cluster and
+    turns on some optimizations/special case handlers. Default: ``False``
 
 URLs
 ----
@@ -149,19 +166,16 @@ Example::
 ``admins``
     Comma-separated list of email addresses that should receive a report about every error code 500 thrown by pretix.
 
+.. _`django-settings`:
+
 Django settings
 ---------------
 
 Example::
 
     [django]
-    hosts=localhost
     secret=j1kjps5a5&4ilpn912s7a1!e2h!duz^i3&idu@_907s$wrz@x-
     debug=off
-
-``hosts``
-    Comma-separated list of allowed host names for this installation.
-    Default: ``localhost``
 
 ``secret``
     The secret to be used by Django for signing and verification purposes. If this
@@ -172,6 +186,25 @@ Example::
     Whether or not to run in debug mode. Default is ``False``.
 
     .. WARNING:: Never set this to ``True`` in production!
+
+``profile``
+    Enable code profiling for a random subset of requests. Disabled by default, see
+    :ref:`perf-monitoring` for details.
+
+.. _`metrics-settings`:
+
+Metrics
+-------
+
+If you want to fetch internally collected prometheus-style metrics you need to configure the credentials for the
+metrics endpoint and enable it::
+
+    [metrics]
+    enabled=true
+    user=your_user
+    passphrase=mysupersecretpassphrase
+
+Currently, metrics-collection requires a redis server to be available.
 
 
 Memcached
@@ -187,6 +220,9 @@ You can use an existing memcached server as pretix's caching backend::
 
 If no memcached is configured, pretix will use Django's built-in local-memory caching method.
 
+.. note:: If you use memcached and you deploy pretix across multiple servers, you should use *one*
+          shared memcached instance, not multiple ones, because cache invalidations would not be
+          propagated otherwise.
 
 Redis
 -----
@@ -223,6 +259,19 @@ an AMQP server (e.g. RabbitMQ) as a broker and redis or your database as a resul
 RabbitMQ might be the better choice if you have a complex, multi-server, high-performance setup,
 but as you already should have a redis instance ready for session and lock storage, we recommend
 redis for convenience. See the `Celery documentation`_ for more details.
+
+Sentry
+------
+
+pretix has native support for sentry, a tool that you can use to track errors in the
+application. If you want to use sentry, you need to set a DSN in the configuration file::
+
+    [sentry]
+    dsn=https://<key>:<secret>@sentry.io/<project>
+
+``dsn``
+    You will be given this value by your sentry installation.
+
 
 Secret length
 -------------

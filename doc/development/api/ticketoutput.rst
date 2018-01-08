@@ -58,12 +58,14 @@ The output class
 
    .. autoattribute:: is_enabled
 
+   .. autoattribute:: multi_download_enabled
+
    .. autoattribute:: settings_form_fields
 
    .. automethod:: settings_content_render
 
    .. automethod:: generate
 
-   .. autoattribute:: download_button_text
+   .. automethod:: generate_order
 
-   .. autoattribute:: download_button_icon
+   .. autoattribute:: download_button_text

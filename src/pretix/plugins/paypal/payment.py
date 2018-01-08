@@ -1,19 +1,36 @@
 import json
 import logging
+import urllib.parse
 from collections import OrderedDict
 
 import paypalrestsdk
 from django import forms
 from django.contrib import messages
+from django.core import signing
 from django.template.loader import get_template
 from django.utils.translation import ugettext as __, ugettext_lazy as _
 
-from pretix.base.models import Quota
-from pretix.base.payment import BasePaymentProvider
+from pretix.base.models import Order, Quota, RequiredAction
+from pretix.base.payment import BasePaymentProvider, PaymentException
+from pretix.base.services.mail import SendMailException
 from pretix.base.services.orders import mark_order_paid, mark_order_refunded
+from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
+from pretix.plugins.paypal.models import ReferencedPayPalObject
 
 logger = logging.getLogger('pretix.plugins.paypal')
+
+
+class RefundForm(forms.Form):
+    auto_refund = forms.ChoiceField(
+        initial='auto',
+        label=_('Refund automatically?'),
+        choices=(
+            ('auto', _('Automatically refund charge with PayPal')),
+            ('manual', _('Do not send refund instruction to PayPal, only mark as refunded in pretix'))
+        ),
+        widget=forms.RadioSelect,
+    )
 
 
 class Paypal(BasePaymentProvider):
@@ -38,12 +55,23 @@ class Paypal(BasePaymentProvider):
                 ('client_id',
                  forms.CharField(
                      label=_('Client ID'),
+                     help_text=_('<a target="_blank" rel="noopener" href="{docs_url}">{text}</a>').format(
+                         text=_('Click here for a tutorial on how to obtain the required keys'),
+                         docs_url='https://docs.pretix.eu/en/latest/user/payments/paypal.html'
+                     )
                  )),
                 ('secret',
                  forms.CharField(
                      label=_('Secret'),
                  ))
             ]
+        )
+
+    def settings_content_render(self, request):
+        return "<div class='alert alert-info'>%s<br /><code>%s</code></div>" % (
+            _('Please configure a PayPal Webhook to the following endpoint in order to automatically cancel orders '
+              'when payments are refunded externally.'),
+            build_global_uri('plugins:paypal:webhook')
         )
 
     def init_api(self):
@@ -63,42 +91,36 @@ class Paypal(BasePaymentProvider):
 
     def checkout_prepare(self, request, cart):
         self.init_api()
-        items = []
-        for cp in cart['positions']:
-            items.append({
-                "name": str(cp.item.name),
-                "description": str(cp.variation) if cp.variation else "",
-                "quantity": cp.count,
-                "price": str(cp.price),
-                "currency": request.event.currency
-            })
-        if cart['payment_fee']:
-            items.append({
-                "name": __('Payment method fee'),
-                "description": "",
-                "quantity": 1,
-                "currency": request.event.currency,
-                "price": str(cart['payment_fee'])
-            })
+        kwargs = {}
+        if request.resolver_match and 'cart_namespace' in request.resolver_match.kwargs:
+            kwargs['cart_namespace'] = request.resolver_match.kwargs['cart_namespace']
+
         payment = paypalrestsdk.Payment({
             'intent': 'sale',
             'payer': {
                 "payment_method": "paypal",
             },
             "redirect_urls": {
-                "return_url": build_absolute_uri(request.event, 'plugins:paypal:return'),
-                "cancel_url": build_absolute_uri(request.event, 'plugins:paypal:abort'),
+                "return_url": build_absolute_uri(request.event, 'plugins:paypal:return', kwargs=kwargs),
+                "cancel_url": build_absolute_uri(request.event, 'plugins:paypal:abort', kwargs=kwargs),
             },
             "transactions": [
                 {
                     "item_list": {
-                        "items": items
+                        "items": [
+                            {
+                                "name": __('Order for %s') % str(request.event),
+                                "quantity": 1,
+                                "price": str(cart['total']),
+                                "currency": request.event.currency
+                            }
+                        ]
                     },
                     "amount": {
                         "currency": request.event.currency,
                         "total": str(cart['total'])
                     },
-                    "description": __('Event tickets for %s') % request.event.name
+                    "description": __('Event tickets for {event}').format(event=request.event.name)
                 }
             ]
         })
@@ -113,10 +135,16 @@ class Paypal(BasePaymentProvider):
                     logger.error('Invalid payment state: ' + str(payment))
                     return
                 request.session['payment_paypal_id'] = payment.id
-                request.session['payment_paypal_event'] = self.event.id
                 for link in payment.links:
                     if link.method == "REDIRECT" and link.rel == "approval_url":
-                        return str(link.href)
+                        if request.session.get('iframe_session', False):
+                            signer = signing.Signer(salt='safe-redirect')
+                            return (
+                                build_absolute_uri(request.event, 'plugins:paypal:redirect') + '?url=' +
+                                urllib.parse.quote(signer.sign(link.href))
+                            )
+                        else:
+                            return str(link.href)
             else:
                 messages.error(request, _('We had trouble communicating with PayPal'))
                 logger.error('Error on creating payment: ' + str(payment.error))
@@ -138,8 +166,8 @@ class Paypal(BasePaymentProvider):
         Will be called if the user submitted his order successfully to initiate the
         payment process.
 
-        It should return a custom redirct URL, if you need special behaviour, or None to
-        continue with default behaviour.
+        It should return a custom redirct URL, if you need special behavior, or None to
+        continue with default behavior.
 
         On errors, it should use Django's message framework to display an error message
         to the user (or the normal form validation error messages).
@@ -148,23 +176,49 @@ class Paypal(BasePaymentProvider):
         """
         if (request.session.get('payment_paypal_id', '') == ''
                 or request.session.get('payment_paypal_payer', '') == ''):
-            messages.error(request, _('We were unable to process your payment. See below for details on how to '
-                                      'proceed.'))
+            raise PaymentException(_('We were unable to process your payment. See below for details on how to '
+                                     'proceed.'))
 
         self.init_api()
         payment = paypalrestsdk.Payment.find(request.session.get('payment_paypal_id'))
+        ReferencedPayPalObject.objects.get_or_create(order=order, reference=payment.id)
         if str(payment.transactions[0].amount.total) != str(order.total) or payment.transactions[0].amount.currency != \
                 self.event.currency:
-            messages.error(request, _('We were unable to process your payment. See below for details on how to '
-                                      'proceed.'))
             logger.error('Value mismatch: Order %s vs payment %s' % (order.id, str(payment)))
-            return
+            raise PaymentException(_('We were unable to process your payment. See below for details on how to '
+                                     'proceed.'))
 
         return self._execute_payment(payment, request, order)
 
     def _execute_payment(self, payment, request, order):
-        payment.execute({"payer_id": request.session.get('payment_paypal_payer')})
+        if payment.state == 'created':
+            payment.replace([
+                {
+                    "op": "replace",
+                    "path": "/transactions/0/item_list",
+                    "value": {
+                        "items": [
+                            {
+                                "name": __('Order {slug}-{code}').format(slug=self.event.slug.upper(), code=order.code),
+                                "quantity": 1,
+                                "price": str(order.total),
+                                "currency": order.event.currency
+                            }
+                        ]
+                    }
+                },
+                {
+                    "op": "replace",
+                    "path": "/transactions/0/description",
+                    "value": __('Order {order} for {event}').format(
+                        event=request.event.name,
+                        order=order.code
+                    )
+                }
+            ])
+            payment.execute({"payer_id": request.session.get('payment_paypal_payer')})
 
+        order.refresh_from_db()
         if payment.state == 'pending':
             messages.warning(request, _('PayPal has not yet approved the payment. We will inform you as soon as the '
                                         'payment completed.'))
@@ -173,15 +227,27 @@ class Paypal(BasePaymentProvider):
             return
 
         if payment.state != 'approved':
-            messages.error(request, _('We were unable to process your payment. See below for details on how to '
-                                      'proceed.'))
             logger.error('Invalid state: %s' % str(payment))
+            raise PaymentException(_('We were unable to process your payment. See below for details on how to '
+                                     'proceed.'))
+
+        if order.status == Order.STATUS_PAID:
+            logger.warning('PayPal success event even though order is already marked as paid')
             return
 
         try:
             mark_order_paid(order, 'paypal', json.dumps(payment.to_dict()))
         except Quota.QuotaExceededException as e:
-            messages.error(request, str(e))
+            RequiredAction.objects.create(
+                event=request.event, action_type='pretix.plugins.paypal.overpaid', data=json.dumps({
+                    'order': order.code,
+                    'payment': payment.id
+                })
+            )
+            raise PaymentException(str(e))
+
+        except SendMailException:
+            messages.warning(request, _('There was an error sending the confirmation mail.'))
         return None
 
     def order_pending_render(self, request, order) -> str:
@@ -206,10 +272,28 @@ class Paypal(BasePaymentProvider):
                'payment_info': payment_info, 'order': order}
         return template.render(ctx)
 
-    def order_control_refund_render(self, order) -> str:
-        return '<div class="alert alert-info">%s</div>' % _('The money will be automatically refunded.')
+    def _refund_form(self, request):
+        return RefundForm(data=request.POST if request.method == "POST" else None)
+
+    def order_control_refund_render(self, order, request) -> str:
+        template = get_template('pretixplugins/paypal/control_refund.html')
+        ctx = {
+            'request': request,
+            'form': self._refund_form(request),
+        }
+        return template.render(ctx)
 
     def order_control_refund_perform(self, request, order) -> "bool|str":
+        f = self._refund_form(request)
+        if not f.is_valid():
+            messages.error(request, _('Your input was invalid, please try again.'))
+            return
+        elif f.cleaned_data.get('auto_refund') == 'manual':
+            order = mark_order_refunded(order, user=request.user)
+            order.payment_manual = True
+            order.save()
+            return
+
         self.init_api()
 
         if order.payment_info:
@@ -218,7 +302,7 @@ class Paypal(BasePaymentProvider):
             payment_info = None
 
         if not payment_info:
-            mark_order_refunded(order)
+            mark_order_refunded(order, user=request.user)
             messages.warning(request, _('We were unable to transfer the money back automatically. '
                                         'Please get in touch with the customer and transfer it back manually.'))
             return
@@ -236,14 +320,14 @@ class Paypal(BasePaymentProvider):
                                         'Please get in touch with the customer and transfer it back manually.'))
         else:
             sale = paypalrestsdk.Payment.find(payment_info['id'])
-            order = mark_order_refunded(order)
+            order = mark_order_refunded(order, user=request.user)
             order.payment_info = json.dumps(sale.to_dict())
             order.save()
 
     def order_can_retry(self, order):
-        return True
+        return self._is_still_available(order=order)
 
-    def retry_prepare(self, request, order):
+    def order_prepare(self, request, order):
         self.init_api()
         payment = paypalrestsdk.Payment({
             'intent': 'sale',
@@ -259,7 +343,7 @@ class Paypal(BasePaymentProvider):
                     "item_list": {
                         "items": [
                             {
-                                "name": 'Order %s' % order.code,
+                                "name": __('Order {slug}-{code}').format(slug=self.event.slug.upper(), code=order.code),
                                 "quantity": 1,
                                 "price": str(order.total),
                                 "currency": order.event.currency
@@ -270,7 +354,10 @@ class Paypal(BasePaymentProvider):
                         "currency": request.event.currency,
                         "total": str(order.total)
                     },
-                    "description": __('Event tickets for %s') % request.event.name
+                    "description": __('Order {order} for {event}').format(
+                        event=request.event.name,
+                        order=order.code
+                    )
                 }
             ]
         })

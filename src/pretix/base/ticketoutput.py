@@ -1,11 +1,14 @@
+import os
+import tempfile
 from collections import OrderedDict
 from typing import Tuple
+from zipfile import ZipFile
 
 from django import forms
 from django.http import HttpRequest
 from django.utils.translation import ugettext_lazy as _
 
-from pretix.base.models import Event, Order
+from pretix.base.models import Event, Order, OrderPosition
 from pretix.base.settings import SettingsSandbox
 
 
@@ -29,19 +32,65 @@ class BaseTicketOutput:
         """
         return self.settings.get('_enabled', as_type=bool)
 
-    def generate(self, order: Order) -> Tuple[str, str, str]:
+    @property
+    def multi_download_enabled(self) -> bool:
+        """
+        Returns whether or not the ``generate_order`` method may be called. Returns
+        ``True`` by default.
+        """
+        return True
+
+    def generate(self, position: OrderPosition) -> Tuple[str, str, str]:
         """
         This method should generate the download file and return a tuple consisting of a
-        filename, a file type and file content.
+        filename, a file type and file content. The extension will be taken from the filename
+        which is otherwise ignored.
+
+        .. note:: If the event uses the event series feature (internally called subevents)
+                  and your generated ticket contains information like the event name or date,
+                  you probably want to display the properties of the subevent. A common pattern
+                  to do this would be a declaration ``ev = position.subevent or position.order.event``
+                  and then access properties that are present on both classes like ``ev.name`` or
+                  ``ev.date_from``.
         """
         raise NotImplementedError()
+
+    def generate_order(self, order: Order) -> Tuple[str, str, str]:
+        """
+        This method is the same as order() but should not generate one file per order position
+        but instead one file for the full order.
+
+        This method is optional to implement. If you don't implement it, the default
+        implementation will offer a zip file of the generate() results for the order positions.
+
+        This method should generate a download file and return a tuple consisting of a
+        filename, a file type and file content. The extension will be taken from the filename
+        which is otherwise ignored.
+
+        If you override this method, make sure that positions that are addons (i.e. ``addon_to``
+        is set) are only outputted if the event setting ``ticket_download_addons`` is active.
+        Do the same for positions that are non-admission without ``ticket_download_nonadm`` active.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            with ZipFile(os.path.join(d, 'tmp.zip'), 'w') as zipf:
+                for pos in order.positions.all():
+                    if pos.addon_to_id and not self.event.settings.ticket_download_addons:
+                        continue
+                    if not pos.item.admission and not self.event.settings.ticket_download_nonadm:
+                        continue
+                    fname, __, content = self.generate(pos)
+                    zipf.writestr('{}-{}{}'.format(
+                        order.code, pos.positionid, os.path.splitext(fname)[1]
+                    ), content)
+
+            with open(os.path.join(d, 'tmp.zip'), 'rb') as zipf:
+                return '{}-{}.zip'.format(order.code, self.identifier), 'application/zip', zipf.read()
 
     @property
     def verbose_name(self) -> str:
         """
-        A human-readable name for this ticket output. This should
-        be short but self-explaining. Good examples include 'PDF tickets'
-        and 'Passbook'.
+        A human-readable name for this ticket output. This should be short but
+        self-explanatory. Good examples include 'PDF tickets' and 'Passbook'.
         """
         raise NotImplementedError()  # NOQA
 
@@ -50,7 +99,7 @@ class BaseTicketOutput:
         """
         A short and unique identifier for this ticket output.
         This should only contain lowercase letters and in most
-        cases will be the same as your packagename.
+        cases will be the same as your package name.
         """
         raise NotImplementedError()  # NOQA
 
@@ -107,10 +156,3 @@ class BaseTicketOutput:
         The text on the download button in the frontend.
         """
         return _('Download ticket')
-
-    @property
-    def download_button_icon(self) -> str:
-        """
-        The name of the icon on the download button in the frontend
-        """
-        return None

@@ -5,6 +5,7 @@ from django.contrib.auth.password_validation import (
 )
 from django.db.models import Q
 from django.utils.translation import ugettext_lazy as _
+from pytz import common_timezones
 
 from pretix.base.models import User
 
@@ -31,24 +32,26 @@ class UserSettingsForm(forms.ModelForm):
                                     required=False,
                                     label=_("Repeat new password"),
                                     widget=forms.PasswordInput())
-    # timezone = forms.ChoiceField(
-    #     choices=((a, a) for a in common_timezones),
-    #     label=_("Default timezone"),
-    # )
+    timezone = forms.ChoiceField(
+        choices=((a, a) for a in common_timezones),
+        label=_("Default timezone"),
+        help_text=_('Only used for views that are not bound to an event. For all '
+                    'event views, the event timezone is used instead.')
+    )
 
     class Meta:
         model = User
         fields = [
-            'givenname',
-            'familyname',
+            'fullname',
             'locale',
-            # 'timezone',
+            'timezone',
             'email'
         ]
 
     def __init__(self, *args, **kwargs):
         self.user = kwargs.pop('user')
         super().__init__(*args, **kwargs)
+        self.fields['email'].required = True
 
     def clean_old_pw(self):
         old_pw = self.cleaned_data.get('old_pw')
@@ -102,3 +105,11 @@ class UserSettingsForm(forms.ModelForm):
             self.instance.set_password(password1)
 
         return self.cleaned_data
+
+
+class User2FADeviceAddForm(forms.Form):
+    name = forms.CharField(label=_('Device name'), max_length=64)
+    devicetype = forms.ChoiceField(label=_('Device type'), widget=forms.RadioSelect, choices=(
+        ('totp', _('Smartphone with the Authenticator application')),
+        ('u2f', _('U2F-compatible hardware token (e.g. Yubikey)')),
+    ))

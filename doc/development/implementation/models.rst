@@ -1,6 +1,8 @@
 .. highlight:: python
    :linenothreshold: 5
 
+.. spelling:: answ contrib
+
 Data model
 ==========
 
@@ -20,13 +22,25 @@ Organizers and events
 .. autoclass:: pretix.base.models.Organizer
    :members:
 
-.. autoclass:: pretix.base.models.OrganizerPermission
-   :members:
-
 .. autoclass:: pretix.base.models.Event
+   :members: get_date_from_display, get_time_from_display, get_date_to_display, get_date_range_display, presale_has_ended, presale_is_running, cache, lock, get_plugins, get_mail_backend, payment_term_last, get_payment_providers, get_invoice_renderers, active_subevents, invoice_renderer, settings
+
+.. autoclass:: pretix.base.models.SubEvent
+   :members: get_date_from_display, get_time_from_display, get_date_to_display, get_date_range_display, presale_has_ended, presale_is_running
+
+.. autoclass:: pretix.base.models.Team
    :members:
 
-.. autoclass:: pretix.base.models.EventPermission
+.. autoclass:: pretix.base.models.RequiredAction
+   :members:
+
+.. autoclass:: pretix.base.models.EventMetaProperty
+   :members:
+
+.. autoclass:: pretix.base.models.EventMetaValue
+   :members:
+
+.. autoclass:: pretix.base.models.SubEventMetaValue
    :members:
 
 
@@ -40,6 +54,15 @@ Items
    :members:
 
 .. autoclass:: pretix.base.models.ItemVariation
+   :members:
+
+.. autoclass:: pretix.base.models.SubEventItem
+  :members:
+
+.. autoclass:: pretix.base.models.SubEventItemVariation
+   :members:
+
+.. autoclass:: pretix.base.models.ItemAddOn
    :members:
 
 .. autoclass:: pretix.base.models.Question
@@ -66,6 +89,9 @@ Carts and Orders
 .. autoclass:: pretix.base.models.QuestionAnswer
    :members:
 
+.. autoclass:: pretix.base.models.Checkin
+   :members:
+
 Logging
 -------
 
@@ -86,5 +112,3 @@ Vouchers
 
 .. autoclass:: pretix.base.models.Voucher
    :members:
-
-.. _cleanerversion: https://github.com/swisscom/cleanerversion

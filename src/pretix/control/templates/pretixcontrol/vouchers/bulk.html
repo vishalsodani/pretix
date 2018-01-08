@@ -10,30 +10,47 @@
         {% bootstrap_form_errors form %}
         <fieldset>
             <legend>{% trans "Voucher codes" %}</legend>
-            <div class="form-group">
-                <div class="col-md-6 col-md-offset-3">
+            <div class="form-group form-inline">
+                <div class="col-md-7 col-sm-12 col-md-offset-3">
+                    <input type="text" class="form-control input-xs"
+                           id="voucher-bulk-codes-prefix"
+                           placeholder="{% trans "Prefix (optional)" %}">
                     <div class="input-group">
-                        <input type="text" class="form-control input-xs"
+                        <input type="number" class="form-control input-xs"
                                id="voucher-bulk-codes-num"
                                placeholder="{% trans "Number" %}">
                         <div class="input-group-btn">
                             <button class="btn btn-default" type="button" id="voucher-bulk-codes-generate"
-                                data-length="{{ code_length }}">
+                                    data-rng-url="{% url 'control:event.vouchers.rng' organizer=request.event.organizer.slug event=request.event.slug %}">
                                 {% trans "Generate random codes" %}
+                            </button>
+                            <button type="button" class="btn btn-default btn-clipboard" data-clipboard-target="#id_codes">
+                                <i class="fa fa-clipboard" aria-hidden="true"></i>
+                                {% trans "Copy codes" %}
                             </button>
                         </div>
                     </div>
                 </div>
             </div>
-            {% bootstrap_field form.codes layout="horizontal" %}
+            {% bootstrap_field form.codes layout="control" %}
+
+            {% bootstrap_field form.max_usages layout="control" %}
         </fieldset>
         <fieldset>
             <legend>{% trans "Voucher details" %}</legend>
-            {% bootstrap_field form.valid_until layout="horizontal" %}
-            {% bootstrap_field form.block_quota layout="horizontal" %}
-            {% bootstrap_field form.allow_ignore_quota layout="horizontal" %}
-            {% bootstrap_field form.price layout="horizontal" %}
-            {% bootstrap_field form.itemvar layout="horizontal" %}
+            {% bootstrap_field form.valid_until layout="control" horizontal_field_class="col-md-9 splitdatetimerow" %}
+            {% bootstrap_field form.block_quota layout="control" %}
+            {% bootstrap_field form.allow_ignore_quota layout="control" %}
+            <div class="form-group">
+                <label class="col-md-3 control-label" for="id_tag">{% trans "Price effect" %}</label>
+                <div class="col-md-5">
+                    {% bootstrap_field form.price_mode show_label=False form_group_class="" %}
+                </div>
+                <div class="col-md-4">
+                    {% bootstrap_field form.value show_label=False form_group_class="" %}
+                </div>
+            </div>
+            {% bootstrap_field form.itemvar layout="control" %}
             <div class="form-group">
                 <div class="col-md-9 col-md-offset-3">
                     <div class="controls">
@@ -47,8 +64,11 @@
                     </div>
                 </div>
             </div>
-            {% bootstrap_field form.tag layout="horizontal" %}
-            {% bootstrap_field form.comment layout="horizontal" %}
+            {% if form.subevent %}
+                {% bootstrap_field form.subevent layout="control" %}
+            {% endif %}
+            {% bootstrap_field form.tag layout="control" %}
+            {% bootstrap_field form.comment layout="control" %}
         </fieldset>
         {% eventsignal request.event "pretix.control.signals.voucher_form_html" form=form %}
         <div class="form-group submit-group">

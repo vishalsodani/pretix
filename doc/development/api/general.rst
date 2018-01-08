@@ -11,7 +11,7 @@ Core
 ----
 
 .. automodule:: pretix.base.signals
-   :members: periodic_task
+   :members: periodic_task, event_live_issues, event_copy_data, email_filter, register_notification_types
 
 Order events
 """"""""""""
@@ -19,17 +19,17 @@ Order events
 There are multiple signals that will be sent out in the ordering cycle:
 
 .. automodule:: pretix.base.signals
-   :members: order_paid, order_placed
+   :members: validate_cart, order_fee_calculation, order_paid, order_placed, order_fee_type_name, allow_ticket_download
 
 Frontend
 --------
 
 .. automodule:: pretix.presale.signals
-   :members: html_head, footer_links, front_page_top, front_page_bottom
+   :members: html_head, html_footer, footer_links, front_page_top, front_page_bottom, fee_calculation_for_cart, contact_form_fields, question_form_fields, checkout_confirm_messages, checkout_confirm_page_content
 
 
 .. automodule:: pretix.presale.signals
-   :members: order_info
+   :members: order_info, order_meta_from_request
 
 Request flow
 """"""""""""
@@ -47,20 +47,26 @@ Backend
 -------
 
 .. automodule:: pretix.control.signals
-   :members: nav_event, html_head
+   :members: nav_event, html_head, quota_detail_html, nav_topbar, nav_global, nav_organizer, nav_event_settings, order_info, event_settings_widget
 
 
 .. automodule:: pretix.base.signals
-   :members: logentry_display
+   :members: logentry_display, logentry_object_link, requiredaction_display
 
 Vouchers
 """"""""
 
 .. automodule:: pretix.control.signals
-   :members: voucher_form_class, voucher_form_html
+   :members: voucher_form_class, voucher_form_html, voucher_form_validation
 
 Dashboards
 """"""""""
 
 .. automodule:: pretix.control.signals
    :members: event_dashboard_widgets, user_dashboard_widgets
+
+Ticket designs
+""""""""""""""
+
+.. automodule:: pretix.plugins.ticketoutputpdf.signals
+   :members: layout_text_variables

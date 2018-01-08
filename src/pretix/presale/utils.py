@@ -1,5 +1,8 @@
+import warnings
+from importlib import import_module
 from urllib.parse import urljoin
 
+from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.core.urlresolvers import resolve
 from django.http import Http404
@@ -7,15 +10,20 @@ from django.shortcuts import redirect
 from django.utils.translation import ugettext_lazy as _
 
 from pretix.base.middleware import LocaleMiddleware
-from pretix.base.models import Event, EventPermission, Organizer
+from pretix.base.models import Event, Organizer
 from pretix.multidomain.urlreverse import get_domain
 from pretix.presale.signals import process_request, process_response
 
+SessionStore = import_module(settings.SESSION_ENGINE).SessionStore
 
-def _detect_event(request):
+
+def _detect_event(request, require_live=True, require_plugin=None):
+    if hasattr(request, '_event_detected'):
+        return
+
     url = resolve(request.path_info)
     try:
-        if hasattr(request, 'organizer'):
+        if hasattr(request, 'organizer_domain'):
             # We are on an organizer's custom domain
             if 'organizer' in url.kwargs and url.kwargs['organizer']:
                 if url.kwargs['organizer'] != request.organizer.slug:
@@ -23,13 +31,12 @@ def _detect_event(request):
                 path = "/" + request.get_full_path().split("/", 2)[-1]
                 return redirect(path)
 
-            request.event = Event.objects\
-                .select_related('organizer')\
+            request.event = request.organizer.events\
                 .get(
                     slug=url.kwargs['event'],
                     organizer=request.organizer,
                 )
-            request.organizer = request.event.organizer
+            request.organizer = request.organizer
         else:
             # We are on our main domain
             if 'event' in url.kwargs and 'organizer' in url.kwargs:
@@ -59,10 +66,31 @@ def _detect_event(request):
             # Restrict locales to the ones available for this event
             LocaleMiddleware().process_request(request)
 
-            if not request.event.live:
-                if not request.user.is_authenticated() or not EventPermission.objects.filter(
-                        event=request.event, user=request.user).exists():
+            if require_live and not request.event.live:
+                can_access = (
+                    url.url_name == 'event.auth'
+                    or (
+                        request.user.is_authenticated
+                        and request.user.has_event_permission(request.organizer, request.event)
+                    )
+
+                )
+                if not can_access and 'pretix_event_access_{}'.format(request.event.pk) in request.session:
+                    sparent = SessionStore(request.session.get('pretix_event_access_{}'.format(request.event.pk)))
+                    try:
+                        parentdata = sparent.load()
+                    except:
+                        pass
+                    else:
+                        can_access = 'event_access' in parentdata
+
+                if not can_access:
                     raise PermissionDenied(_('The selected ticket shop is currently not available.'))
+
+            if require_plugin:
+                is_core = any(require_plugin.startswith(m) for m in settings.CORE_MODULES)
+                if require_plugin not in request.event.get_plugins() and not is_core:
+                    raise Http404(_('This feature is not enabled.'))
 
             for receiver, response in process_request.send(request.event, request=request):
                 if response:
@@ -73,15 +101,38 @@ def _detect_event(request):
     except Organizer.DoesNotExist:
         raise Http404(_('The selected organizer was not found.'))
 
+    request._event_detected = True
 
-def event_view(func):
-    def wrap(request, *args, **kwargs):
-        ret = _detect_event(request)
-        if ret:
-            return ret
-        else:
-            response = func(request=request, *args, **kwargs)
-            for receiver, r in process_response.send(request.event, request=request, response=response):
-                response = r
-            return response
-    return wrap
+
+def _event_view(function=None, require_live=True, require_plugin=None):
+    def event_view_wrapper(func, require_live=require_live):
+        def wrap(request, *args, **kwargs):
+            ret = _detect_event(request, require_live=require_live, require_plugin=require_plugin)
+            if ret:
+                return ret
+            else:
+                response = func(request=request, *args, **kwargs)
+                for receiver, r in process_response.send(request.event, request=request, response=response):
+                    response = r
+                return response
+
+        for attrname in dir(func):
+            # Preserve flags like csrf_exempt
+            if not attrname.startswith('__'):
+                setattr(wrap, attrname, getattr(func, attrname))
+        return wrap
+
+    if function:
+        return event_view_wrapper(function, require_live=require_live)
+    return event_view_wrapper
+
+
+def event_view(function=None, require_live=True):
+    warnings.warn('The event_view decorator is deprecated since it will be automatically applied by the URL routing '
+                  'layer when you use event_urls.',
+                  DeprecationWarning)
+
+    def noop(fn):
+        return fn
+
+    return function or noop

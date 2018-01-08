@@ -9,7 +9,8 @@ constructive and friendly feedback on your changes.
 First of all, you'll need pretix running locally on your machine. Head over to :ref:`devsetup` to learn how to do this.
 If you run into any problems on your way, please do not hesitate to ask us anytime!
 
-Please note that we have a :ref:`coc` in place that applies to all communication around the project.
+Please note that we bound ourselves to a :ref:`coc` that applies to all communication around the project. You can be
+assured that we will not tolerate any form of harassment.
 
 Sending a patch
 ---------------
@@ -18,8 +19,9 @@ If you improved pretix in any way, we'd be very happy if you contribute it
 back to the main code base! The easiest way to do so is to `create a pull request`_
 on our `GitHub repository`_.
 
-Before you do so, please `squash all your changes`_ into one single commit. Please
-use the test suite to check whether your changes break any existing features and run
+We recommend that you create a feature branch for every issue you work on so the changes can
+be reviewed individually.
+Please use the test suite to check whether your changes break any existing features and run
 the code style checks to confirm you are consistent with pretix's coding style. You'll
 find instructions on this in the :ref:`checksandtests` section of the development setup guide.
 
@@ -34,4 +36,3 @@ Again: If you get stuck, do not hesitate to contact any of us, or Raphael person
 
 .. _create a pull request: https://help.github.com/articles/creating-a-pull-request/
 .. _GitHub repository: https://github.com/pretix/pretix
-.. _squash all your changes: https://davidwalsh.name/squash-commits-git

@@ -5,11 +5,16 @@ from os import path
 
 from setuptools import find_packages, setup
 
+from pretix import __version__
+
 here = path.abspath(path.dirname(__file__))
 
 # Get the long description from the relevant file
-with open(path.join(here, '../README.md'), encoding='utf-8') as f:
-    long_description = f.read()
+try:
+    with open(path.join(here, '../README.rst'), encoding='utf-8') as f:
+        long_description = f.read()
+except:
+    long_description = ''
 
 
 class CustomBuild(build):
@@ -23,9 +28,10 @@ class CustomBuild(build):
         settings.COMPRESS_ENABLED = True
         settings.COMPRESS_OFFLINE = True
 
+        management.call_command('compilemessages', verbosity=1, interactive=False)
+        management.call_command('compilejsi18n', verbosity=1, interactive=False)
         management.call_command('collectstatic', verbosity=1, interactive=False)
         management.call_command('compress', verbosity=1, interactive=False)
-        management.call_command('compilemessages', verbosity=1, interactive=False)
         build.run(self)
 
 
@@ -36,46 +42,98 @@ cmdclass = {
 
 setup(
     name='pretix',
-    version='0.0.0',
-    description='Reinventing ticket presales',
+    version=__version__,
+    description='Reinventing presales, one ticket at a time',
     long_description=long_description,
-    url='http://pretix.eu',
+    url='https://pretix.eu',
     author='Raphael Michel',
     author_email='mail@raphaelmichel.de',
     license='Apache License 2.0',
     classifiers=[
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 5 - Production/Stable',
         'Intended Audience :: Developers',
         'Intended Audience :: Other Audience',
+        'Topic :: Internet :: WWW/HTTP :: Dynamic Content',
+        'Environment :: Web Environment',
         'License :: OSI Approved :: Apache Software License',
-        'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
-        'Framework :: Django :: 1.8'
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
+        'Framework :: Django :: 1.11'
     ],
 
     keywords='tickets web shop ecommerce',
     install_requires=[
-        'Django>=1.9,<1.10', 'python-dateutil>=2.4,<2.5',
-        'pytz', 'django-bootstrap3>=6.2,<6.3', 'django-formset-js',
-        'django-compressor==2.0', 'reportlab>=3.2,<3.3',
-        'easy-thumbnails>=2.2,<3'
-        'PyPDF2', 'BeautifulSoup4', 'html5lib',
-        'slimit', 'lxml', 'static3==0.6.1', 'dj-static', 'chardet',
-        'csscompressor', 'defusedxml', 'mt-940', 'django-markup', 'markdown'
+        'Django==1.11.*',
+        'djangorestframework==3.6.*',
+        'python-dateutil==2.4.*',
+        'pytz',
+        'django-bootstrap3==8.2.*',
+        'django-formset-js-improved==0.5.0.1',
+        'django-compressor==2.1',
+        'django-hierarkey==1.0.*,>=1.0.2',
+        'django-filter==1.0.*',
+        'reportlab==3.4.*',
+        'easy-thumbnails==2.4.*',
+        'PyPDF2==1.26.*',
+        'django-libsass',
+        'libsass',
+        'django-otp==0.3.*',
+        'python-u2flib-server==4.*',
+        'django-formtools==2.0',
+        'celery==4.1.*',
+        'kombu==4.1.*',
+        'django-statici18n==1.3.*',
+        'inlinestyler==0.2.*',
+        'BeautifulSoup4',
+        'slimit',
+        'lxml',
+        'static3==0.6.1',
+        'dj-static',
+        'csscompressor',
+        'django-markup',
+        'markdown',
+        'bleach==2.*',
+        'raven',
+        'paypalrestsdk==1.12.*',
+        'pycparser==2.13',
+        'django-redis==4.7.*',
+        'redis==2.10.5',
+        'stripe==1.62.*',
+        'chardet<3.1.0,>=3.0.2',
+        'mt-940==4.7',
+        'django-i18nfield>=1.2.1',
+        'vobject==0.9.*',
+        'pycountry',
+        'django-countries',
+        'pyuca',
+        'defusedcsv',
+        'vat_moss==0.11.0',
     ],
     extras_require={
-        'dev': ['django-debug-toolbar>=1.3.0,<2.0'],
-        'test': ['pep8==1.5.7', 'pyflakes', 'pep8-naming', 'flake8', 'coverage',
-                 'pytest', 'pytest-django'],
+        'dev': [
+            'django-debug-toolbar==1.7',
+            'sqlparse==0.2.1',
+            'pep8==1.5.7',
+            'pyflakes==1.1.0',
+            'flake8',
+            'pep8-naming',
+            'coveralls',
+            'coverage',
+            'pytest==2.9.*',
+            'pytest-django',
+            'isort',
+            'pytest-mock',
+            'pytest-rerunfailures',
+            'pytest-warnings',
+            'responses'
+        ],
         'memcached': ['pylibmc'],
         'mysql': ['mysqlclient'],
-        'paypal': ['paypalrestsdk>=1.9,<1.10,<2.0'],
         'postgres': ['psycopg2'],
-        'redis': ['django-redis>=4.1,<4.2', 'redis>=2.10,<2.11'],
-        'stripe': ['stripe>=1.22,<1.23']
     },
 
     packages=find_packages(exclude=['tests', 'tests.*']),
     include_package_data=True,
-    cmdclass=cmdclass
+    cmdclass=cmdclass,
 )

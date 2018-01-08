@@ -11,12 +11,33 @@ of every page in the frontend. You will get the request as the keyword argument
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
 
+html_footer = EventPluginSignal(
+    providing_args=["request"]
+)
+"""
+This signal allows you to put code before the end of the HTML ``<body>`` tag
+of every page in the frontend. You will get the request as the keyword argument
+``request`` and are expected to return plain HTML.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
 footer_link = EventPluginSignal(
     providing_args=["request"]
 )
 """
 The signal ``pretix.presale.signals.footer_links`` allows you to add links to the footer of an event page. You
 are expected to return a dictionary containing the keys ``label`` and ``url``.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+checkout_confirm_messages = EventPluginSignal()
+"""
+This signal is sent out to retrieve short messages that need to be acknowledged by the user before the
+order can be completed. This is typically used for something like "accept the terms and conditions".
+Receivers are expected to return a dictionary where the keys are globally unique identifiers for the
+message and the values can be arbitrary HTML.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
@@ -33,6 +54,67 @@ voucher_redeem_info = EventPluginSignal(
 )
 """
 This signal is sent out to display additional information on the "redeem a voucher" page
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_meta_from_request = EventPluginSignal(
+    providing_args=["request"]
+)
+"""
+This signal is sent before an order is created through the pretixpresale frontend. It allows you
+to return a dictionary that will be merged in the meta_info attribute of the order.
+You will receive the request triggering the order creation as the ``request`` keyword argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+checkout_confirm_page_content = EventPluginSignal(
+    providing_args=['request']
+)
+"""
+This signals allows you to add HTML content to the confirmation page that is presented at the
+end of the checkout process, just before the order is being created.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event. A ``request``
+argument will contain the request object.
+"""
+
+fee_calculation_for_cart = EventPluginSignal(
+    providing_args=['request']
+)
+"""
+This signals allows you to add fees to a cart. You are expected to return a list of ``OrderFee``
+objects that are not yet saved to the database (because there is no order yet).
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event. A ``request``
+argument will contain the request object and ``invoice_address`` the invoice address (useful for
+tax calculation).
+"""
+
+contact_form_fields = EventPluginSignal(
+    providing_args=[]
+)
+"""
+This signals allows you to add form fields to the contact form that is presented during checkout
+and by default only asks for the email address. You are supposed to return a dictionary of
+form fields with globally unique keys. The validated form results will be saved into the
+``contact_form_data`` entry of the order's meta_info dictionary.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+question_form_fields = EventPluginSignal(
+    providing_args=["position"]
+)
+"""
+This signals allows you to add form fields to the questions form that is presented during checkout
+and by default asks for the questions configured in the backend. You are supposed to return a dictionary
+of form fields with globally unique keys. The validated form results will be saved into the
+``question_form_data`` entry of the position's meta_info dictionary.
+
+The ``position`` keyword argument will contain either a ``CartPosition`` object or an ``OrderPosition``
+object, depending on whether the form is called as part of the order checkout or for changing an order
+later.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """

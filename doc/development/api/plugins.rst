@@ -1,8 +1,10 @@
 .. highlight:: python
    :linenothreshold: 5
 
-Plugin basics
-=============
+.. _`pluginsetup`:
+
+Creating a plugin
+=================
 
 It is possible to extend pretix with custom Python code using the official plugin
 API. Every plugin has to be implemented as an independent Django 'app' living
@@ -14,10 +16,15 @@ The communication between pretix and the plugins happens mostly using Django's
 ``pretix.control`` and ``pretix.presale`` expose a number of signals which are documented
 on the next pages.
 
-.. _`pluginsetup`:
-
 To create a new plugin, create a new python package which must be a valid `Django app`_
 and must contain plugin metadata, as described below.
+There is some boilerplate that you will need for every plugin to get started. To save your
+time, we created a `cookiecutter`_ template that you can use like this::
+
+   $ pip install cookiecutter
+   $ cookiecutter https://github.com/pretix/pretix-plugin-cookiecutter
+
+This will ask you some questions and then create a project folder for your plugin.
 
 The following pages go into detail about the several types of plugins currently
 supported. While these instructions don't assume that you know a lot about pretix,
@@ -30,46 +37,40 @@ Plugin metadata
 The plugin metadata lives inside a ``PretixPluginMeta`` class inside your app's
 configuration class. The metadata class must define the following attributes:
 
-``type`` (``pretix.base.plugins.PluginType``):
-    The type of plugin. Currently available: ``RESTRICTION``, ``PAYMENT``,
-    ``ADMINFEATURE``
+.. rst-class:: rest-resource-table
 
-``name`` (``str``):
-    The human-readable name of your plugin
-
-``author`` (``str``):
-    Your name
-
-``version`` (``str``):
-    A human-readable version code of your plugin
-
-``description`` (``str``):
-    A more verbose description of what your plugin does.
+================== ==================== ===========================================================
+Attribute          Type                 Description
+================== ==================== ===========================================================
+name               string               The human-readable name of your plugin
+author             string               Your name
+version            string               A human-readable version code of your plugin
+description        string               A more verbose description of what your plugin does.
+visible            boolean (optional)   ``True`` by default, can hide a plugin so it cannot be normally activated.
+restricted         boolean (optional)   ``False`` by default, restricts a plugin such that it can only be enabled
+                                        for an event by system administrators / superusers.
+================== ==================== ===========================================================
 
 A working example would be::
 
-    # file: pretix/plugins/timerestriction/__init__.py
     from django.apps import AppConfig
     from django.utils.translation import ugettext_lazy as _
-    from pretix.base.plugins import PluginType
 
 
-    class TimeRestrictionApp(AppConfig):
-        name = 'pretix.plugins.timerestriction'
-        verbose_name = _("Time restriction")
+    class PaypalApp(AppConfig):
+        name = 'pretix_paypal'
+        verbose_name = _("PayPal")
 
         class PretixPluginMeta:
-            type = PluginType.RESTRICTION
-            name = _("Restriciton by time")
+            name = _("PayPal")
             author = _("the pretix team")
             version = '1.0.0'
-            description = _("This plugin adds the possibility to restrict the sale " +
-                            "of a given item or variation to a certain timeframe " +
-                            "or change its price during a certain period.")
+            visible = True
+            restricted = False
+            description = _("This plugin allows you to receive payments via PayPal")
 
 
-    default_app_config = 'pretix.plugins.timerestriction.TimeRestrictionApp'
-
+    default_app_config = 'pretix_paypal.PaypalApp'
 
 The ``AppConfig`` class may implement a property ``compatiblity_errors``, that checks
 whether the pretix installation meets all requirements of the plugin. If so,
@@ -86,11 +87,10 @@ make use of the `entry point`_ feature of setuptools. To register a plugin that 
 in a separate python package, your ``setup.py`` should contain something like this::
 
     setup(
-        …
-
+        args...,
         entry_points="""
     [pretix.plugin]
-    sampleplugin=sampleplugin:PretixPluginMeta
+    pretix_paypal=pretix_paypal:PretixPluginMeta
     """
     )
 
@@ -108,11 +108,24 @@ pages. We suggest that you put your signal receivers into a ``signals`` submodul
 of your plugin. You should extend your ``AppConfig`` (see above) by the following
 method to make your receivers available::
 
-    class TimeRestrictionApp(AppConfig):
+    class PaypalApp(AppConfig):
         …
 
         def ready(self):
             from . import signals  # NOQA
+
+You can optionally specify code that is executed when your plugin is activated for an event
+in the ``installed`` method::
+
+    class PaypalApp(AppConfig):
+        …
+
+        def installed(self, event):
+            pass  # Your code here
+
+
+Note that ``installed`` will *not* be called if the plugin in indirectly activated for an event
+because the event is created with settings copied from another event.
 
 Views
 -----
@@ -130,3 +143,4 @@ your Django app label.
 .. _signal dispatcher: https://docs.djangoproject.com/en/1.7/topics/signals/
 .. _namespace packages: http://legacy.python.org/dev/peps/pep-0420/
 .. _entry point: https://pythonhosted.org/setuptools/setuptools.html#dynamic-discovery-of-services-and-plugins
+.. _cookiecutter: https://cookiecutter.readthedocs.io/en/latest/

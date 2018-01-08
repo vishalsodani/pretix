@@ -11,16 +11,27 @@
 
             <h2>{% trans "Thank you!" %}</h2>
             {% if order.status != 'p' %}
-                <p>{% trans "Your order has been placed successfully. See below for details." %}</p>
+                <p>
+                    {% trans "Your order has been placed successfully. See below for details." %}<br>
+                    <strong>
+                        {% trans "Please note that we still await your payment to complete the process." %}
+                    </strong>
+                </p>
             {% elif order.total == 0 %}
                 <p>{% trans "Your order has been processed successfully! See below for details." %}</p>
             {% else %}
                 <p>{% trans "We successfully received your payment. See below for details." %}</p>
             {% endif %}
-            <p>{% blocktrans trimmed %}
+            <p class="iframe-hidden">{% blocktrans trimmed %}
                 Please bookmark or save the link to this exact page if you want to download your ticket or change
                 your details later. We also sent you an email containing the link to the address you specified.
             {% endblocktrans %}</p>
+            <p class="iframe-only">{% blocktrans trimmed %}
+                Please save the following link if you want to download your ticket or change your details later. We
+                also sent you an email containing the link to the address you specified.
+            {% endblocktrans %}<br>
+            <code>{{ url }}</code></p>
+            <div class="clearfix"></div>
         </div>
     {% endif %}
     <h2>
@@ -33,6 +44,14 @@
     {% if order.status == "n" %}
         <div class="panel panel-danger">
             <div class="panel-heading">
+                {% if can_change_method %}
+                    <div class="pull-right">
+                        <a href="{% eventurl event "presale:event.order.pay.change" secret=order.secret order=order.code %}">
+                            <span class="fa fa-edit"></span>
+                            {% trans "Use different payment method" %}
+                        </a>
+                    </div>
+                {% endif %}
                 <h3 class="panel-title">
                     {% trans "Payment" %}
                 </h3>
@@ -53,30 +72,33 @@
         </div>
     {% endif %}
     {% if order.status == 'p' and event.settings.ticket_download %}
-        <div class="panel panel-primary">
-            <div class="panel-heading">
-                <h3 class="panel-title">{% trans "Ticket download" %}</h3>
+        {% if can_download and download_buttons %}
+            <div class="alert alert-info">
+                {% blocktrans trimmed %}
+                    You can download your tickets using the buttons below. Please have your ticket ready when entering the event.
+                {% endblocktrans %}
             </div>
-            <div class="panel-body">
-                {% if can_download %}
-                    <p>
-                        {% blocktrans trimmed %}
-                            Please obtain your ticket below. Please have your ticket ready when entering the event.
-                        {% endblocktrans %}
-                    </p>
+            {% if cart.positions|length > 1 and can_download_multi %}
+                <p>
+                    {% trans "Download all tickets at once:" %}
                     {% for b in download_buttons %}
-                        <a href="{% eventurl event "presale:event.order.download" secret=order.secret order=order.code output=b.identifier %}"
-                                class="btn btn-primary">
-                            <span class="fa {{ b.icon }}"></span> {{ b.text }}
-                        </a>
+                        {% if b.multi %}
+                            <a href="{% eventurl event "presale:event.order.download.combined" secret=order.secret order=order.code output=b.identifier %}"
+                                    class="btn btn-default btn-sm {% if b.identifier == "pdf" %}btn-primary{% endif %}"
+                                    data-asyncdownload>
+                                <span class="fa fa-download"></span> {{ b.text }}
+                            </a>
+                        {% endif %}
                     {% endfor %}
-                {% else %}
-                    {% blocktrans trimmed with date=event.settings.ticket_download_date|date:"SHORT_DATE_FORMAT" %}
-                        You will be able to download your tickets here on {{ date }}.
-                    {% endblocktrans %}
-                {% endif %}
+                </p>
+            {% endif %}
+        {% elif not download_buttons %}
+            <div class="alert alert-info">
+                {% blocktrans trimmed with date=ticket_download_date|date:"SHORT_DATE_FORMAT" %}
+                    You will be able to download your tickets here starting on {{ date }}.
+                {% endblocktrans %}
             </div>
-        </div>
+        {% endif %}
     {% endif %}
     <div class="panel panel-primary cart">
         <div class="panel-heading">
@@ -93,7 +115,7 @@
             </h3>
         </div>
         <div class="panel-body">
-            {% include "pretixpresale/event/fragment_cart.html" with cart=cart event=request.event editable=False %}
+            {% include "pretixpresale/event/fragment_cart.html" with cart=cart event=request.event download=can_download editable=False %}
         </div>
     </div>
     {% eventsignal event "pretix.presale.signals.order_info" order=order %}
@@ -166,11 +188,13 @@
                             <dt>{% trans "ZIP code and city" %}</dt>
                             <dd>{{ order.invoice_address.zipcode }} {{ order.invoice_address.city }}</dd>
                             <dt>{% trans "Country" %}</dt>
-                            <dd>{{ order.invoice_address.country }}</dd>
+                            <dd>{{ order.invoice_address.country.name|default:order.invoice_address.country_old }}</dd>
                             {% if request.event.settings.invoice_address_vatid %}
                                 <dt>{% trans "VAT ID" %}</dt>
                                 <dd>{{ order.invoice_address.vat_id }}</dd>
                             {% endif %}
+                            <dt>{% trans "Internal Reference" %}</dt>
+                            <dd>{{ order.invoice_address.internal_reference }}</dd>
                         </dl>
                     </div>
                 </div>

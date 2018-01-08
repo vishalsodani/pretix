@@ -1,20 +1,38 @@
+import logging
 from collections import OrderedDict
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
+import pytz
 from django import forms
 from django.contrib import messages
-from django.db.models import Sum
 from django.dispatch import receiver
 from django.forms import Form
 from django.http import HttpRequest
 from django.template.loader import get_template
-from django.utils.translation import ugettext_lazy as _
+from django.utils.timezone import now
+from django.utils.translation import pgettext_lazy, ugettext_lazy as _
+from i18nfield.forms import I18nFormField, I18nTextarea
+from i18nfield.strings import LazyI18nString
 
 from pretix.base.decimal import round_decimal
 from pretix.base.models import CartPosition, Event, Order, Quota
+from pretix.base.reldate import RelativeDateField, RelativeDateWrapper
 from pretix.base.settings import SettingsSandbox
 from pretix.base.signals import register_payment_providers
+from pretix.presale.views import get_cart_total
+from pretix.presale.views.cart import get_or_create_cart_id
+
+logger = logging.getLogger(__name__)
+
+
+class PaymentProviderForm(Form):
+    def clean(self):
+        cleaned_data = super().clean()
+        for k, v in self.fields.items():
+            val = cleaned_data.get(k)
+            if v._required and not val:
+                self.add_error(k, _('This field is required.'))
 
 
 class BasePaymentProvider:
@@ -31,6 +49,17 @@ class BasePaymentProvider:
 
     def __str__(self):
         return self.identifier
+
+    @property
+    def is_meta(self) -> bool:
+        """
+        Returns whether or whether not this payment provider is a "meta" payment provider that only
+        works as a settings holder for other payment providers and should never be used directly. This
+        is a trick to implement payment gateways with multiple payment methods but unified payment settings.
+        Take a look at the built-in stripe provider to see how this might be used.
+        By default, this returns ``False``.
+        """
+        return False
 
     @property
     def is_enabled(self) -> bool:
@@ -67,11 +96,21 @@ class BasePaymentProvider:
         raise NotImplementedError()  # NOQA
 
     @property
+    def public_name(self) -> str:
+        """
+        A human-readable name for this payment provider to be shown to the public.
+        This should be short but self-explaining. Good examples include 'Bank transfer'
+        and 'Credit card', but 'Credit card via Stripe' might be to explicit. By default,
+        this is the same as ``verbose_name``
+        """
+        return self.verbose_name
+
+    @property
     def identifier(self) -> str:
         """
         A short and unique identifier for this payment provider.
         This should only contain lowercase letters and in most
-        cases will be the same as your packagename.
+        cases will be the same as your package name.
         """
         raise NotImplementedError()  # NOQA
 
@@ -85,7 +124,7 @@ class BasePaymentProvider:
         settings keys and the values should be corresponding Django form fields.
 
         The default implementation returns the appropriate fields for the ``_enabled``,
-        ``_fee_abs`` and ``_fee_percent`` settings mentioned above.
+        ``_fee_abs``, ``_fee_percent`` and ``_availability_date`` settings mentioned above.
 
         We suggest that you return an ``OrderedDict`` object instead of a dictionary
         and make use of the default implementation. Your implementation could look
@@ -122,17 +161,35 @@ class BasePaymentProvider:
             ('_fee_percent',
              forms.DecimalField(
                  label=_('Additional fee'),
-                 help_text=_('Percentage'),
+                 help_text=_('Percentage of the order total. Note that this percentage will currently only '
+                             'be calculated on the summed price of sold tickets, not on other fees like e.g. shipping '
+                             'fees, if there are any.'),
                  required=False
+             )),
+            ('_availability_date',
+             RelativeDateField(
+                 label=_('Available until'),
+                 help_text=_('Users will not be able to choose this payment provider after the given date.'),
+                 required=False,
              )),
             ('_fee_reverse_calc',
              forms.BooleanField(
                  label=_('Calculate the fee from the total value including the fee.'),
-                 help_text=_('We recommend you to enable this if you want your users to pay the payment fees of your '
-                             'payment provider. <a href="/control/help/payment/fee_reverse" target="_blank">Click here '
-                             'for detailled information on what this does.</a> Don\'t forget to set the correct fees '
-                             'above!'),
+                 help_text=_('We recommend to enable this if you want your users to pay the payment fees of your '
+                             'payment provider. <a href="{docs_url}" target="_blank" rel="noopener">Click here '
+                             'for detailed information on what this does.</a> Don\'t forget to set the correct fees '
+                             'above!').format(docs_url='https://docs.pretix.eu/en/latest/user/payments/fees.html'),
                  required=False
+             )),
+            ('_invoice_text',
+             I18nFormField(
+                 label=_('Text on invoices'),
+                 help_text=_('Will be printed just below the payment figures and above the closing text on invoices. '
+                             'This will only be used if the invoice is generated before the order is paid. If the '
+                             'invoice is generated later, it will show a text stating that it has already been paid.'),
+                 required=False,
+                 widget=I18nTextarea,
+                 widget_kwargs={'attrs': {'rows': '2'}}
              )),
         ])
 
@@ -143,6 +200,16 @@ class BasePaymentProvider:
         that is displayed below the form fields configured in ``settings_form_fields``.
         """
         pass
+
+    def render_invoice_text(self, order: Order) -> str:
+        """
+        This is called when an invoice for an order with this payment provider is generated.
+        The default implementation returns the content of the _invoice_text configuration
+        variable (an I18nString), or an empty string if unconfigured.
+        """
+        if order.status == Order.STATUS_PAID:
+            return pgettext_lazy('invoice', 'The payment for this invoice has already been received.')
+        return self.settings.get('_invoice_text', as_type=LazyI18nString, default='')
 
     @property
     def payment_form_fields(self) -> dict:
@@ -161,9 +228,13 @@ class BasePaymentProvider:
         process. The default implementation constructs the form using
         :py:attr:`checkout_form_fields` and sets appropriate prefixes for the form
         and all fields and fills the form with data form the user's session.
+
+        If you overwrite this, we strongly suggest that you inherit from
+        ``PaymentProviderForm`` (from this module) that handles some nasty issues about
+        required fields for you.
         """
-        form = Form(
-            data=(request.POST if request.method == 'POST' else None),
+        form = PaymentProviderForm(
+            data=(request.POST if request.method == 'POST' and request.POST.get("payment") == self.identifier else None),
             prefix='payment_%s' % self.identifier,
             initial={
                 k.replace('payment_%s_' % self.identifier, ''): v
@@ -172,7 +243,45 @@ class BasePaymentProvider:
             }
         )
         form.fields = self.payment_form_fields
+
+        for k, v in form.fields.items():
+            v._required = v.required
+            v.required = False
+            v.widget.is_required = False
+
         return form
+
+    def _is_still_available(self, now_dt=None, cart_id=None, order=None):
+        now_dt = now_dt or now()
+        tz = pytz.timezone(self.event.settings.timezone)
+
+        availability_date = self.settings.get('_availability_date', as_type=RelativeDateWrapper)
+        if availability_date:
+            if self.event.has_subevents and cart_id:
+                availability_date = min([
+                    availability_date.datetime(se).date()
+                    for se in self.event.subevents.filter(
+                        id__in=CartPosition.objects.filter(
+                            cart_id=cart_id, event=self.event
+                        ).values_list('subevent', flat=True)
+                    )
+                ])
+            elif self.event.has_subevents and order:
+                availability_date = min([
+                    availability_date.datetime(se).date()
+                    for se in self.event.subevents.filter(
+                        id__in=order.positions.values_list('subevent', flat=True)
+                    )
+                ])
+            elif self.event.has_subevents:
+                logger.error('Payment provider is not subevent-ready.')
+                return False
+            else:
+                availability_date = availability_date.datetime(self.event).date()
+
+            return availability_date >= now_dt.astimezone(tz).date()
+
+        return True
 
     def is_allowed(self, request: HttpRequest) -> bool:
         """
@@ -181,13 +290,13 @@ class BasePaymentProvider:
         user will not be able to select this payment method. This will only be called
         during checkout, not on retrying.
 
-        The default implementation always returns ``True``.
+        The default implementation checks for the _availability_date setting to be either unset or in the future.
         """
-        return True
+        return self._is_still_available(cart_id=get_or_create_cart_id(request))
 
     def payment_form_render(self, request: HttpRequest) -> str:
         """
-        When the user selects this provider as his prefered payment method,
+        When the user selects this provider as his preferred payment method,
         they will be shown the HTML you return from this method.
 
         The default implementation will call :py:meth:`checkout_form`
@@ -212,14 +321,14 @@ class BasePaymentProvider:
         """
         raise NotImplementedError()  # NOQA
 
-    def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> "bool|str":
+    def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> Union[bool, str]:
         """
         Will be called after the user selects this provider as his payment method.
         If you provided a form to the user to enter payment data, this method should
         at least store the user's input into his session.
 
         This method should return ``False`` if the user's input was invalid, ``True``
-        if the input was valid and the frontend should continue with default behaviour
+        if the input was valid and the frontend should continue with default behavior
         or a string containing a URL if the user should be redirected somewhere else.
 
         On errors, you should use Django's message framework to display an error message
@@ -270,7 +379,7 @@ class BasePaymentProvider:
         """
         After the user has confirmed their purchase, this method will be called to complete
         the payment process. This is the place to actually move the money if applicable.
-        If you need any special  behaviour,  you can return a string
+        If you need any special  behavior,  you can return a string
         containing the URL the user will be redirected to. If you are done with your process
         you should return the user to the order's detail page.
 
@@ -284,9 +393,7 @@ class BasePaymentProvider:
         The default implementation just returns ``None`` and therefore leaves the
         order unpaid. The user will be redirected to the order's detail page by default.
 
-        On errors, you should use Django's message framework to display an error message
-        to the user.
-
+        On errors, you should raise a ``PaymentException``.
         :param order: The order object
         """
         return None
@@ -314,23 +421,53 @@ class BasePaymentProvider:
         """
         raise NotImplementedError()  # NOQA
 
+    def order_change_allowed(self, order: Order) -> bool:
+        """
+        Will be called to check whether it is allowed to change the payment method of
+        an order to this one.
+
+        The default implementation checks for the _availability_date setting to be either unset or in the future.
+
+        :param order: The order object
+        """
+        return self._is_still_available(order=order)
+
     def order_can_retry(self, order: Order) -> bool:
         """
         Will be called if the user views the detail page of an unpaid order to determine
         whether the user should be presented with an option to retry the payment. The default
         implementation always returns False.
 
+        If you want to enable retrials for your payment method, the best is to just return
+        ``self._is_still_available()`` from this method to disable it as soon as the method
+        gets disabled or the methods end date is reached.
+
+        The retry workflow is also used if a user switches to this payment method for an existing
+        order!
+
         :param order: The order object
         """
         return False
 
-    def retry_prepare(self, request: HttpRequest, order: Order) -> "bool|str":
+    def retry_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
+        """
+        Deprecated, use order_prepare instead
+        """
+        raise DeprecationWarning('retry_prepare is deprecated, use order_prepare instead')
+        return self.order_prepare(request, order)
+
+    def order_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
         """
         Will be called if the user retries to pay an unpaid order (after the user filled in
-        e.g. the form returned by :py:meth:`payment_form`).
+        e.g. the form returned by :py:meth:`payment_form`) or if the user changes the payment
+        method.
 
         It should return and report errors the same way as :py:meth:`checkout_prepare`, but
         receives an ``Order`` object instead of a cart object.
+
+        Note: The ``Order`` object given to this method might be different from the version
+        stored in the database as it's total will already contain the payment fee for the
+        new payment method.
         """
         form = self.payment_form(request)
         if form.is_valid():
@@ -366,7 +503,7 @@ class BasePaymentProvider:
         """
         return _('Payment provider: %s' % self.verbose_name)
 
-    def order_control_refund_render(self, order: Order) -> str:
+    def order_control_refund_render(self, order: Order, request: HttpRequest=None) -> str:
         """
         Will be called if the event administrator clicks an order's 'refund' button.
         This can be used to display information *before* the order is being refunded.
@@ -376,18 +513,22 @@ class BasePaymentProvider:
         automatically.
 
         :param order: The order object
+        :param request: The HTTP request
+
+        .. versionchanged:: 1.6
+
+           The parameter ``request`` has been added.
         """
-        order.log_action('pretix.base.order.refunded')
         return '<div class="alert alert-warning">%s</div>' % _('The money can not be automatically refunded, '
                                                                'please transfer the money back manually.')
 
-    def order_control_refund_perform(self, request: HttpRequest, order: Order) -> "bool|str":
+    def order_control_refund_perform(self, request: HttpRequest, order: Order) -> Union[bool, str]:
         """
         Will be called if the event administrator confirms the refund.
 
         This should transfer the money back (if possible). You can return the URL the
-        user should be redirected to if you need special behaviour or None to continue
-        with default behaviour.
+        user should be redirected to if you need special behavior or None to continue
+        with default behavior.
 
         On failure, you should use Django's message framework to display an error message
         to the user.
@@ -403,6 +544,10 @@ class BasePaymentProvider:
         mark_order_refunded(order, user=request.user)
         messages.success(request, _('The order has been marked as refunded. Please transfer the money '
                                     'back to the buyer manually.'))
+
+
+class PaymentException(Exception):
+    pass
 
 
 class FreeOrderProvider(BasePaymentProvider):
@@ -433,7 +578,7 @@ class FreeOrderProvider(BasePaymentProvider):
         try:
             mark_order_paid(order, 'free', send_mail=False)
         except Quota.QuotaExceededException as e:
-            messages.error(request, str(e))
+            raise PaymentException(str(e))
 
     @property
     def settings_form_fields(self) -> dict:
@@ -442,13 +587,13 @@ class FreeOrderProvider(BasePaymentProvider):
     def order_control_refund_render(self, order: Order) -> str:
         return ''
 
-    def order_control_refund_perform(self, request: HttpRequest, order: Order) -> "bool|str":
+    def order_control_refund_perform(self, request: HttpRequest, order: Order) -> Union[bool, str]:
         """
         Will be called if the event administrator confirms the refund.
 
         This should transfer the money back (if possible). You can return the URL the
-        user should be redirected to if you need special behaviour or None to continue
-        with default behaviour.
+        user should be redirected to if you need special behavior or None to continue
+        with default behavior.
 
         On failure, you should use Django's message framework to display an error message
         to the user.
@@ -465,9 +610,14 @@ class FreeOrderProvider(BasePaymentProvider):
         messages.success(request, _('The order has been marked as refunded.'))
 
     def is_allowed(self, request: HttpRequest) -> bool:
-        return CartPosition.objects.filter(
-            cart_id=request.session.session_key, event=request.event
-        ).aggregate(sum=Sum('price'))['sum'] == 0
+        from .services.cart import get_fees
+
+        total = get_cart_total(request)
+        total += sum([f.value for f in get_fees(self.event, request, total, None, None)])
+        return total == 0
+
+    def order_change_allowed(self, order: Order) -> bool:
+        return False
 
 
 @receiver(register_payment_providers, dispatch_uid="payment_free")

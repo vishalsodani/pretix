@@ -3,15 +3,13 @@ from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
 
 from pretix import __version__ as version
-from pretix.base.plugins import PluginType
 
 
 class PaypalApp(AppConfig):
     name = 'pretix.plugins.paypal'
-    verbose_name = _("Stripe")
+    verbose_name = _("PayPal")
 
     class PretixPluginMeta:
-        type = PluginType.PAYMENT
         name = _("PayPal")
         author = _("the pretix team")
         version = version
@@ -28,5 +26,6 @@ class PaypalApp(AppConfig):
         except ImportError:
             errs.append("Python package 'paypalrestsdk' is not installed.")
         return errs
+
 
 default_app_config = 'pretix.plugins.paypal.PaypalApp'

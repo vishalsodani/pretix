@@ -3,7 +3,6 @@ from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
 
 from pretix import __version__ as version
-from pretix.base.plugins import PluginType
 
 
 class ReportsApp(AppConfig):
@@ -11,7 +10,6 @@ class ReportsApp(AppConfig):
     verbose_name = _("Report exporter")
 
     class PretixPluginMeta:
-        type = PluginType.PAYMENT
         name = _("Report exporter")
         author = _("the pretix team")
         version = version
@@ -28,5 +26,6 @@ class ReportsApp(AppConfig):
         except ImportError:
             errs.append("Python package 'reportlab' is not installed.")
         return errs
+
 
 default_app_config = 'pretix.plugins.reports.ReportsApp'

@@ -3,10 +3,12 @@
 {% load staticfiles %}
 {% load thumbnail %}
 {% load eventurl %}
+{% load safelink %}
 {% block thetitle %}
     {% block title %}{% endblock %}{% if url_name != "event.index" %} :: {% endif %}{{ event.name }}
 {% endblock %}
 {% block above %}
+    <script type="text/javascript" src="{% static "pretixpresale/js/ui/iframe.js" %}"></script>
     {% if not event.live %}
         <div class="offline-banner">
             <div class="container">
@@ -21,24 +23,28 @@
 {% endblock %}
 {% block page %}
     <div class="page-header">
-        <h1 class="pull-left">
+        <div class="pull-left">
             {% if event_logo %}
-                <a href="{% eventurl event "presale:event.index" %}" title="{{ event.name }}">
+                <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}"
+                        title="{{ event.name }}">
                     <img src="{{ event_logo|thumbnail_url:'logo' }}" alt="{{ event.name }}" class="event-logo" />
                 </a>
             {% else %}
-                <a href="{% eventurl event "presale:event.index" %}">{{ event.name }}</a>
-                <small>{{ event.date_from|date:"DATE_FORMAT" }}{% if event.settings.show_date_to %} –
-                    {{ event.date_to|date:"DATE_FORMAT" }}{% endif %}</small>
+                <h1>
+                    <a href="{% eventurl event "presale:event.index" cart_namespace=cart_namespace|default_if_none:"" %}">{{ event.name }}</a>
+                    {% if not event.has_subevents %}
+                        <small>{{ event.get_date_range_display }}</small>
+                    {% endif %}
+                </h1>
             {% endif %}
-        </h1>
+        </div>
         <div class="pull-right loginbox">
             {% if request.event.settings.locales|length > 1 %}
                 <div class="locales">
-                    {% for l in request.event.settings.locales %}
-                        <a href="{% url "presale:locale.set" %}?locale={{ l }}&next={{ request.path }}%3F{{ request.META.QUERY_STRING|urlencode }}"
-                            class="{% if l == request.LANGUAGE_CODE %}active{% endif %}"
-                            ><img src="{% static "pretixbase/img/flags" %}/{{ l }}.png"/></a>
+                    {% for l in languages %}
+                        <a href="{% url "presale:locale.set" %}?locale={{ l.code }}&next={{ request.path }}%3F{{ request.META.QUERY_STRING|urlencode }}" class="{% if l.code == request.LANGUAGE_CODE %}active{% endif %}" rel="nofollow">
+                            {{ l.name_local }}
+                        </a>
                     {% endfor %}
                 </div>
             {% endif %}
@@ -60,11 +66,7 @@
         <a href="mailto:{{ request.event.settings.contact_mail }}">{% trans "Contact event organizer" %}</a> &middot;
     {% endif %}
     {% if request.event.settings.imprint_url %}
-        <a href="{{ request.event.settings.imprint_url }}" target="_blank">{% trans "Imprint" %}</a>
+        <a href="{% safelink request.event.settings.imprint_url %}" target="_blank" rel="noopener">{% trans "Imprint" %}</a>
         &middot;
     {% endif %}
-    {% for f in footer %}
-        <a href="{{ f.url }}" target="_blank">{{ f.label }}</a>
-        &middot;
-    {% endfor %}
 {% endblock %}

@@ -1,5 +1,5 @@
-Plugin hooks
-============
+Plugin development
+==================
 
 Contents:
 
@@ -10,5 +10,6 @@ Contents:
    exporter
    ticketoutput
    payment
+   invoice
    customview
    general

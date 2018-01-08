@@ -1,21 +1,23 @@
 import json
 import uuid
 
-from django.contrib.contenttypes.fields import GenericRelation
+from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
+from django.utils.crypto import get_random_string
 
-from pretix.base.i18n import I18nJSONEncoder
+from pretix.helpers.json import CustomJSONEncoder
 
 
 def cachedfile_name(instance, filename: str) -> str:
-    return 'cachedfiles/%012d.%s' % (instance.id, filename.split('.')[-1])
+    secret = get_random_string(length=12)
+    return 'cachedfiles/%s.%s.%s' % (instance.id, secret, filename.split('.')[-1])
 
 
 class CachedFile(models.Model):
     """
-    A cached file (e.g. pre-generated ticket PDF)
+    An uploaded file, with an optional expiry date.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     expires = models.DateTimeField(null=True, blank=True)
@@ -34,7 +36,7 @@ def cached_file_delete(sender, instance, **kwargs):
 
 class LoggingMixin:
 
-    def log_action(self, action, data=None, user=None):
+    def log_action(self, action, data=None, user=None, api_token=None):
         """
         Create a LogEntry object that is related to this object.
         See the LogEntry documentation for details.
@@ -45,20 +47,26 @@ class LoggingMixin:
         """
         from .log import LogEntry
         from .event import Event
+        from ..notifications import get_all_notification_types
+        from ..services.notifications import notify
 
         event = None
         if isinstance(self, Event):
             event = self
         elif hasattr(self, 'event'):
             event = self.event
-        l = LogEntry(content_object=self, user=user, action_type=action, event=event)
+        if user and not user.is_authenticated:
+            user = None
+        logentry = LogEntry(content_object=self, user=user, action_type=action, event=event, api_token=api_token)
         if data:
-            l.data = json.dumps(data, cls=I18nJSONEncoder)
-        l.save()
+            logentry.data = json.dumps(data, cls=CustomJSONEncoder)
+        logentry.save()
+
+        if action in get_all_notification_types():
+            notify.apply_async(args=(logentry.pk,))
 
 
 class LoggedModel(models.Model, LoggingMixin):
-    logentries = GenericRelation('pretixbase.LogEntry')
 
     class Meta:
         abstract = True
@@ -69,4 +77,8 @@ class LoggedModel(models.Model, LoggingMixin):
 
         :return: A QuerySet of LogEntry objects
         """
-        return self.logentries.all().select_related('user')
+        from .log import LogEntry
+
+        return LogEntry.objects.filter(
+            content_type=ContentType.objects.get_for_model(type(self)), object_id=self.pk
+        ).select_related('user', 'event')

@@ -1,21 +1,23 @@
 from datetime import datetime, timedelta
 
 from django.conf import settings
-from django.shortcuts import redirect
+from django.http import HttpResponseRedirect
 from django.utils.http import is_safe_url
 from django.views.generic import View
 
+from .robots import NoSearchIndexViewMixin
 
-class LocaleSet(View):
+
+class LocaleSet(NoSearchIndexViewMixin, View):
 
     def get(self, request, *args, **kwargs):
         url = request.GET.get('next', request.META.get('HTTP_REFERER', '/'))
         url = url if is_safe_url(url, host=request.get_host()) else '/'
-        resp = redirect(url)
+        resp = HttpResponseRedirect(url)
 
         locale = request.GET.get('locale')
         if locale in [lc for lc, ll in settings.LANGUAGES]:
-            if request.user.is_authenticated():
+            if request.user.is_authenticated:
                 request.user.locale = locale
                 request.user.save()
 

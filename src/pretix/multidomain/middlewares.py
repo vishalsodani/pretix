@@ -2,21 +2,25 @@ import time
 from urllib.parse import urlparse
 
 from django.conf import settings
-from django.contrib.sessions.middleware import \
-    SessionMiddleware as BaseSessionMiddleware
+from django.contrib.sessions.middleware import (
+    SessionMiddleware as BaseSessionMiddleware,
+)
+from django.core.cache import cache
 from django.core.exceptions import DisallowedHost
 from django.core.urlresolvers import set_urlconf
 from django.http.request import split_domain_port
 from django.middleware.csrf import CsrfViewMiddleware as BaseCsrfMiddleware
 from django.utils.cache import patch_vary_headers
+from django.utils.deprecation import MiddlewareMixin
 from django.utils.http import cookie_date
 
+from pretix.base.models import Organizer
 from pretix.multidomain.models import KnownDomain
 
 LOCAL_HOST_NAMES = ('testserver', 'localhost')
 
 
-class MultiDomainMiddleware:
+class MultiDomainMiddleware(MiddlewareMixin):
     def process_request(self, request):
         # We try three options, in order of decreasing preference.
         if settings.USE_X_FORWARDED_HOST and ('HTTP_X_FORWARDED_HOST' in request.META):
@@ -35,17 +39,26 @@ class MultiDomainMiddleware:
         if domain:
             request.host = domain
             request.port = int(port) if port else None
-            try:
-                kd = KnownDomain.objects.get(domainname=domain)  # noqa
-                request.domain = kd
-            except:
+
+            orga = cache.get('pretix_multidomain_organizer_instance_{}'.format(domain))
+            if orga is None:
+                try:
+                    kd = KnownDomain.objects.select_related('organizer').get(domainname=domain)  # noqa
+                    orga = kd.organizer
+                except KnownDomain.DoesNotExist:
+                    orga = False
+                cache.set('pretix_multidomain_organizer_instance_{}'.format(domain), orga, 3600)
+
+            if orga:
+                request.organizer_domain = True
+                request.organizer = orga if isinstance(orga, Organizer) else Organizer.objects.get(pk=orga)
+                request.urlconf = "pretix.multidomain.subdomain_urlconf"
+            else:
                 if settings.DEBUG or domain in LOCAL_HOST_NAMES or domain == default_domain:
                     request.urlconf = "pretix.multidomain.maindomain_urlconf"
                 else:
                     raise DisallowedHost("Unknown host: %r" % host)
-            else:
-                request.organizer = kd.organizer
-                request.urlconf = "pretix.multidomain.subdomain_urlconf"
+
         else:
             raise DisallowedHost("Invalid HTTP_HOST header: %r." % host)
 
@@ -65,6 +78,14 @@ class SessionMiddleware(BaseSessionMiddleware):
     cookie domains differently depending on whether we are on the main domain or
     a custom domain.
     """
+
+    def process_request(self, request):
+        super().process_request(request)
+
+        if not request.session.session_key:
+            # We need to create session even if we do not yet store something there, because we need the session
+            # key for e.g. saving the user's cart
+            request.session.create()
 
     def process_response(self, request, response):
         try:

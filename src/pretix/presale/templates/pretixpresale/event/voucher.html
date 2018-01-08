@@ -4,11 +4,14 @@
 {% load eventurl %}
 {% load eventsignal %}
 {% load thumbnail %}
-{% load markup_tags %}
+{% load rich_text %}
 {% block title %}{% trans "Voucher redemption" %}{% endblock %}
 
 {% block content %}
     <h2>{% trans "Voucher redemption" %}</h2>
+    {% if subevent %}
+        <h3>{{ subevent.name }}</h3>
+    {% endif %}
     <p>
         {% blocktrans trimmed %}
             You entered a voucher code that allows you to buy one of the following products at the specified price:
@@ -16,12 +19,18 @@
     </p>
     {% if event.presale_is_running or event.settings.show_items_outside_presale_period %}
         <form method="post" data-asynctask
-                action="{% eventurl request.event "presale:event.cart.add" %}?next={{ request.path|urlencode }}">
+                action="{% eventurl request.event "presale:event.cart.add" cart_namespace=cart_namespace %}?next={% eventurl request.event "presale:event.index" cart_namespace=cart_namespace %}">
             {% csrf_token %}
+            <input type="hidden" name="subevent" value="{{ subevent.id|default_if_none:"" }}" />
             <input type="hidden" name="_voucher_code" value="{{ voucher.code }}">
             {% for tup in items_by_category %}
                 <section>
-                    {% if tup.0 %}<h3>{{ tup.0.name }}</h3>{% endif %}
+                    {% if tup.0 %}
+                        <h3>{{ tup.0.name }}</h3>
+                        {% if tup.0.description %}
+                            <p>{{ tup.0.description|localize|rich_text }}</p>
+                        {% endif %}
+                    {% endif %}
                     {% for item in tup.1 %}
                         {% if item.has_variations %}
                             <div class="item-with-variations">
@@ -29,20 +38,29 @@
                                     <div class="col-md-8 col-xs-12">
                                         {% if item.picture %}
                                             <a href="{{ item.picture.url }}" class="productpicture"
-                                                    data-title="{{ item.name }}"
+                                                    data-title="{{ item.name|force_escape|force_escape }}"
+                                                    {# Yes, double-escape to prevent XSS in lightbox #}
                                                     data-lightbox="{{ item.id }}">
                                                 <img src="{{ item.picture|thumbnail_url:'productlist' }}"
                                                         alt="{{ item.name }}"/>
                                             </a>
                                         {% endif %}
-                                        <strong>{{ item.name }}</strong>
-                                        {% if item.description %}<p>{{ item.description|localize|apply_markup:"markdown" }}</p>{% endif %}
+                                        <div class="product-description {% if item.picture %}with-picture{% endif %}">
+                                            <strong>{{ item.name }}</strong>
+                                            {% if item.description %}
+                                                <div class="product-description">
+                                                    {{ item.description|localize|rich_text }}
+                                                </div>
+                                            {% endif %}
+                                        </div>
                                     </div>
                                     <div class="col-md-2 col-xs-6 price">
                                         {% if item.min_price != item.max_price or item.free_price %}
                                             {% blocktrans trimmed with minprice=item.min_price|floatformat:2 currency=event.currency %}
                                                 from {{ currency }} {{ minprice }}
                                             {% endblocktrans %}
+                                        {% elif not item.min_price and not item.max_price %}
+                                            {% trans "FREE" context "price" %}
                                         {% else %}
                                             {{ event.currency }} {{ item.min_price|floatformat:2 }}
                                         {% endif %}
@@ -56,6 +74,11 @@
                                         <div class="row-fluid product-row variation">
                                             <div class="col-md-8 col-xs-12">
                                                 {{ var }}
+                                                {% if var.description %}
+                                                    <div class="variation-description">
+                                                        {{ var.description|localize|rich_text }}
+                                                    </div>
+                                                {% endif %}
                                             </div>
                                             <div class="col-md-2 col-xs-6 price">
                                                 {% if item.free_price %}
@@ -63,15 +86,24 @@
                                                         <span class="input-group-addon">{{ event.currency }}</span>
                                                         <input type="number" class="form-control input-item-price"
                                                                 placeholder="0"
-                                                                min="{{ var.price|stringformat:"0.2f" }}"
+                                                                min="{% if event.settings.display_net_prices %}{{ var.display_price.net|stringformat:"0.2f" }}{% else %}{{ var.display_price.gross|stringformat:"0.2f" }}{% endif %}"
                                                                 name="price_{{ item.id }}_{{ var.id }}"
-                                                                step="0.01" value="{{ var.price|stringformat:"0.2f" }}">
+                                                                value="{% if event.settings.display_net_prices %}{{var.display_price.net|stringformat:"0.2f" }}{% else %}{{ var.display_price.gross|stringformat:"0.2f" }}{% endif %}"
+                                                                step="any">
                                                     </div>
+                                                {% elif not var.display_price.gross %}
+                                                    {% trans "FREE" context "price" %}
+                                                {% elif event.settings.display_net_prices %}
+                                                    {{ event.currency }} {{ var.display_price.net|floatformat:2 }}
                                                 {% else %}
-                                                    {{ event.currency }} {{ var.price|floatformat:2 }}
+                                                    {{ event.currency }} {{ var.display_price.gross|floatformat:2 }}
                                                 {% endif %}
-                                                {% if item.tax_rate %}
-                                                    <small>{% blocktrans trimmed with rate=item.tax_rate %}
+                                                {% if var.display_price.rate and var.display_price.gross and event.settings.display_net_prices %}
+                                                    <small>{% blocktrans trimmed with rate=var.display_price.rate name=var.display_price.name %}
+                                                        <strong>plus</strong> {{ rate }}% taxes
+                                                    {% endblocktrans %}</small>
+                                                {% elif var.display_price.rate and var.display_price.gross %}
+                                                    <small>{% blocktrans trimmed with rate=var.display_price.rate name=var.display_price.name %}
                                                         incl. {{ rate }}% taxes
                                                     {% endblocktrans %}</small>
                                                 {% endif %}
@@ -79,9 +111,15 @@
                                             {% if var.cached_availability.0 == 100 %}
                                                 <div class="col-md-2 col-xs-6 availability-box available radio-box">
                                                     <label>
-                                                        <input type="radio" name="_voucher_item"
-                                                                {% if options == 1 %}checked="checked"{% endif %}
-                                                                value="variation_{{ item.id }}_{{ var.id }}">
+                                                        {% if max_times > 1 %}
+                                                            <input type="number" class="form-control input-item-count" placeholder="0" min="0"
+                                                                    pattern="\d*"
+                                                                    max="{{ item.order_max }}" name="variation_{{ item.id }}_{{ var.id }}">
+                                                        {% else %}
+                                                            <input type="radio" name="_voucher_item"
+                                                                    {% if options == 1 %}checked="checked"{% endif %}
+                                                                    value="variation_{{ item.id }}_{{ var.id }}">
+                                                        {% endif %}
                                                     </label>
                                                 </div>
                                             {% else %}
@@ -97,40 +135,61 @@
                                 <div class="col-md-8 col-xs-12">
                                     {% if item.picture %}
                                         <a href="{{ item.picture.url }}" class="productpicture"
-                                                data-title="{{ item.name }}"
+                                                data-title="{{ item.name|force_escape|force_escape }}"
+                                                {# Yes, double-escape to prevent XSS in lightbox #}
                                                 data-lightbox="{{ item.id }}">
                                             <img src="{{ item.picture|thumbnail_url:'productlist' }}"
                                                     alt="{{ item.name }}"/>
                                         </a>
                                     {% endif %}
-                                    <strong>{{ item.name }}</strong>
-                                    {% if item.description %}
-                                        <p class="description">{{ item.description|localize|apply_markup:"markdown" }}</p>{% endif %}
+                                    <div class="product-description {% if item.picture %}with-picture{% endif %}">
+                                        <strong>{{ item.name }}</strong>
+                                        {% if item.description %}
+                                            <div class="product-description">
+                                                {{ item.description|localize|rich_text }}
+                                            </div>
+                                        {% endif %}
+                                    </div>
                                 </div>
                                 <div class="col-md-2 col-xs-6 price">
                                     {% if item.free_price %}
                                         <div class="input-group input-group-price">
                                             <span class="input-group-addon">{{ event.currency }}</span>
                                             <input type="number" class="form-control input-item-price" placeholder="0"
-                                                    min="{{ item.price|stringformat:"0.2f" }}"
+                                                    min="{% if event.settings.display_net_prices %}{{ item.display_price.net|stringformat:"0.2f" }}{% else %}{{ item.display_price.gross|stringformat:"0.2f" }}{% endif %}"
                                                     name="price_{{ item.id }}"
-                                                    step="0.01" value="{{ item.price|stringformat:"0.2f" }}">
+                                                    value="{% if event.settings.display_net_prices %}{{ item.display_price.net|stringformat:"0.2f" }}{% else %}{{ item.display_price.gross|stringformat:"0.2f" }}{% endif %}"
+                                                    step="any">
                                         </div>
+                                    {% elif not item.display_price.gross %}
+                                        {% trans "FREE" context "price" %}
+                                    {% elif event.settings.display_net_prices %}
+                                        {{ event.currency }} {{ item.display_price.net|floatformat:2 }}
                                     {% else %}
-                                        {{ event.currency }} {{ item.price|floatformat:2 }}
+                                        {{ event.currency }} {{ item.display_price.gross|floatformat:2 }}
                                     {% endif %}
-                                    {% if item.tax_rate %}
-                                        <small>{% blocktrans trimmed with rate=item.tax_rate %}
-                                            incl. {{ rate }}% taxes
+                                    {% if item.display_price.rate and item.display_price.gross and event.settings.display_net_prices %}
+                                        <small>{% blocktrans trimmed with rate=item.display_price.rate name=item.display_price.name %}
+                                            <strong>plus</strong> {{ rate }}% {{ name }}
+                                        {% endblocktrans %}</small>
+                                    {% elif item.display_price.rate and item.display_price.gross%}
+                                        <small>{% blocktrans trimmed with rate=item.display_price.rate name=item.display_price.name %}
+                                            incl. {{ rate }}% {{ name }}
                                         {% endblocktrans %}</small>
                                     {% endif %}
                                 </div>
                                 {% if item.cached_availability.0 == 100 %}
                                     <div class="col-md-2 col-xs-6 availability-box available radio-box">
                                         <label>
-                                            <input type="radio" name="_voucher_item"
-                                                    {% if options == 1 %}checked="checked"{% endif %}
-                                                    value="item_{{ item.id }}">
+                                            {% if max_times > 1 %}
+                                                <input type="number" class="form-control input-item-count" placeholder="0" min="0"
+                                                        pattern="\d*"
+                                                        max="{{ item.order_max }}" name="item_{{ item.id }}">
+                                            {% else %}
+                                                <input type="radio" name="_voucher_item"
+                                                        {% if options == 1 %}checked="checked"{% endif %}
+                                                        value="item_{{ item.id }}">
+                                            {% endif %}
                                         </label>
                                     </div>
                                 {% else %}

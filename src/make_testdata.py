@@ -10,6 +10,7 @@ import django
 django.setup()
 
 from pretix.base.models import *  # NOQA
+from django.utils.timezone import now
 
 if Organizer.objects.exists():
     print("There already is data in your DB!")
@@ -20,20 +21,22 @@ user = User.objects.get_or_create(
 user.set_password('admin')
 user.save()
 organizer = Organizer.objects.create(
-    name='MRMCD e.V', slug='mrmcd'
+    name='BigEvents LLC', slug='bigevents'
 )
-OrganizerPermission.objects.get_or_create(
-    organizer=organizer, user=user
-)
+year = now().year + 1
 event = Event.objects.create(
-    organizer=organizer, name='MRMCD 2015',
-    slug='2015', currency='EUR',
-    date_from=datetime(2015, 9, 4, 17, 0, 0),
-    date_to=datetime(2015, 9, 6, 17, 0, 0),
+    organizer=organizer, name='Demo Conference {}'.format(year),
+    slug=year, currency='EUR', live=True,
+    date_from=datetime(year, 9, 4, 17, 0, 0),
+    date_to=datetime(year, 9, 6, 17, 0, 0),
 )
-EventPermission.objects.get_or_create(
-    event=event, user=user
+t = Team.objects.get_or_create(
+    organizer=organizer, name='Admin Team',
+    all_events=True, can_create_events=True, can_change_teams=True,
+    can_change_organizer_settings=True, can_change_event_settings=True, can_change_items=True,
+    can_view_orders=True, can_change_orders=True, can_view_vouchers=True, can_change_vouchers=True
 )
+t[0].members.add(user)
 cat_tickets = ItemCategory.objects.create(
     event=event, name='Tickets'
 )
@@ -44,14 +47,15 @@ question = Question.objects.create(
     event=event, question='Age',
     type=Question.TYPE_NUMBER, required=False
 )
+tr19 = event.tax_rules.create(rate=19)
 item_ticket = Item.objects.create(
     event=event, category=cat_tickets, name='Ticket',
-    default_price=23, tax_rate=19, admission=True
+    default_price=23, tax_rule=tr19, admission=True
 )
 item_ticket.questions.add(question)
 item_shirt = Item.objects.create(
     event=event, category=cat_merch, name='T-Shirt',
-    default_price=15, tax_rate=19
+    default_price=15, tax_rule=tr19
 )
 var_s = ItemVariation.objects.create(item=item_shirt, value='S')
 var_m = ItemVariation.objects.create(item=item_shirt, value='M')
